@@ -15,26 +15,48 @@ struct ChatView: View {
     private var conversation: Conversation? { store.conversation(conversationID) }
     private var running: Bool { store.isRunning(conversationID) }
 
-    var body: some View {
-        let messages = conversation?.messages ?? []
-        let results = Dictionary(
-            messages.filter { $0.role == .tool }.compactMap { m in m.toolCallId.map { ($0, m) } },
-            uniquingKeysWith: { _, b in b }
-        )
-        let visible = messages.filter { m in
+    // Split out of `body` so the type checker stays fast.
+    private var messages: [ChatMessage] { conversation?.messages ?? [] }
+
+    private var toolResults: [String: ChatMessage] {
+        var d: [String: ChatMessage] = [:]
+        for m in messages where m.role == .tool {
+            if let k = m.toolCallId { d[k] = m }
+        }
+        return d
+    }
+
+    private var visibleMessages: [ChatMessage] {
+        messages.filter { m in
             switch m.role {
             case .user: return true
             case .assistant: return !(m.content.isEmpty && m.toolCalls.isEmpty && m.reasoning.isEmpty)
             default: return false
             }
         }
-        let lastID = messages.last?.id
-        let lastAssistantEmpty = messages.last.map {
-            $0.role != .assistant || ($0.content.isEmpty && $0.toolCalls.isEmpty && $0.reasoning.isEmpty)
-        } ?? true
+    }
 
-        let matches = findVisible ? ChatFind.matches(visible, query: findQuery) : []
-        let currentMatch = findIndex.flatMap { $0 < matches.count ? matches[$0] : nil }
+    private var showThinking: Bool {
+        guard running else { return false }
+        guard let last = messages.last else { return true }
+        let lastEmpty = last.role != .assistant || (last.content.isEmpty && last.toolCalls.isEmpty && last.reasoning.isEmpty)
+        if lastEmpty { return true }
+        return store.approval(for: conversationID) == nil && last.role == .tool
+    }
+
+    private var findMatches: [FindMatch] {
+        findVisible ? ChatFind.matches(visibleMessages, query: findQuery) : []
+    }
+
+    private var streamKey: Int {
+        let c: Int = messages.last?.content.count ?? 0
+        let r: Int = messages.last?.reasoning.count ?? 0
+        return c + r
+    }
+
+    var body: some View {
+        let matches: [FindMatch] = findMatches
+        let current: FindMatch? = findIndex.flatMap { $0 < matches.count ? matches[$0] : nil }
 
         VStack(spacing: 0) {
             if findVisible {
@@ -45,62 +67,10 @@ struct ChatView: View {
                         onClose: { findVisible = false; findQuery = ""; findIndex = nil })
                 Divider()
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if visible.isEmpty {
-                            EmptyChatHint()
-                        }
-                        ForEach(visible) { m in
-                            MessageRow(message: m,
-                                       results: results,
-                                       conversationID: conversationID,
-                                       streaming: running && m.id == lastID)
-                                .padding(currentMatch?.messageID == m.id ? 6 : 0)
-                                .background(currentMatch?.messageID == m.id ? Color.yellow.opacity(0.18) : Color.clear)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .id(m.id)
-                        }
-                        if running && (lastAssistantEmpty || store.approval(for: conversationID) == nil && messages.last?.role == .tool) {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("思考中…").foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 4)
-                        }
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding(20)
-                }
-                .onChange(of: messages.count) { _, _ in
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-                .onChange(of: (messages.last?.content.count ?? 0) + (messages.last?.reasoning.count ?? 0)) { _, _ in
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
-                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-                .onChange(of: currentMatch) { _, m in
-                    if let m { withAnimation { proxy.scrollTo(m.messageID, anchor: .center) } }
-                }
-                .onChange(of: findQuery) { _, _ in
-                    // Land on the newest match, like upstream.
-                    let n = ChatFind.matches(visible, query: findQuery).count
-                    findIndex = n > 0 ? n - 1 : nil
-                }
-                .onChange(of: store.findEvent) { _, ev in
-                    guard store.selectedID == conversationID else { return }
-                    switch ev.kind {
-                    case .open: findVisible = true
-                    case .next: step(1, matches.count)
-                    case .previous: step(-1, matches.count)
-                    }
-                }
-            }
-
+            messageScroller(matches: matches, current: current)
             if let a = store.approval(for: conversationID) {
                 ApprovalBar(approval: a)
             }
-
             Divider()
             InputBar(draft: $draft,
                      images: $pendingImages,
@@ -108,20 +78,78 @@ struct ChatView: View {
                      onSend: send,
                      onStop: { store.stop(conversationID) })
         }
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
-                    .background(Color.accentColor.opacity(0.06))
-                    .overlay(Label("松开以添加图片", systemImage: "photo.badge.plus").font(.title3))
-                    .padding(8)
-                    .allowsHitTesting(false)
-            }
-        }
+        .overlay { dropOverlay }
         .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
             handleDrop(providers)
         }
         .navigationTitle(conversation?.title ?? "OpenMinis")
+    }
+
+    @ViewBuilder private var dropOverlay: some View {
+        if dropTargeted {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                .background(Color.accentColor.opacity(0.06))
+                .overlay(Label("松开以添加图片", systemImage: "photo.badge.plus").font(.title3))
+                .padding(8)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func messageScroller(matches: [FindMatch], current: FindMatch?) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                messageStack(current: current)
+            }
+            .onChange(of: messages.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: streamKey) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of: current) { _, m in
+                if let m { withAnimation { proxy.scrollTo(m.messageID, anchor: .center) } }
+            }
+            .onChange(of: findQuery) { _, _ in
+                // Land on the newest match, like upstream.
+                let n = ChatFind.matches(visibleMessages, query: findQuery).count
+                findIndex = n > 0 ? n - 1 : nil
+            }
+            .onChange(of: store.findEvent) { _, ev in
+                guard store.selectedID == conversationID else { return }
+                switch ev.kind {
+                case .open: findVisible = true
+                case .next: step(1, matches.count)
+                case .previous: step(-1, matches.count)
+                }
+            }
+        }
+    }
+
+    private func messageStack(current: FindMatch?) -> some View {
+        let visible = visibleMessages
+        let results = toolResults
+        let lastID = messages.last?.id
+        return LazyVStack(alignment: .leading, spacing: 14) {
+            if visible.isEmpty { EmptyChatHint() }
+            ForEach(visible) { (m: ChatMessage) in
+                let hit: Bool = current?.messageID == m.id
+                MessageRow(message: m,
+                           results: results,
+                           conversationID: conversationID,
+                           streaming: running && m.id == lastID)
+                    .padding(hit ? 6 : 0)
+                    .background(hit ? Color.yellow.opacity(0.18) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .id(m.id)
+            }
+            if showThinking {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("思考中…").foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 4)
+            }
+            Color.clear.frame(height: 1).id("bottom")
+        }
+        .padding(20)
     }
 
     /// Wraps around; "next" moves toward newer messages.
