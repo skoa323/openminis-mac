@@ -21,6 +21,37 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// For tool messages: the tool reported a failure.
     var isError: Bool = false
     var date: Date = Date()
+    /// Model's reasoning / thinking text (assistant only).
+    var reasoning: String = ""
+    /// Attached image file names inside `Attachments.dir` (user only).
+    var images: [String] = []
+
+    init(id: UUID = UUID(), role: Role, content: String, toolCalls: [ToolCall] = [],
+         toolCallId: String? = nil, toolName: String? = nil, isError: Bool = false,
+         date: Date = Date(), reasoning: String = "", images: [String] = []) {
+        self.id = id; self.role = role; self.content = content; self.toolCalls = toolCalls
+        self.toolCallId = toolCallId; self.toolName = toolName; self.isError = isError
+        self.date = date; self.reasoning = reasoning; self.images = images
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, content, toolCalls, toolCallId, toolName, isError, date, reasoning, images
+    }
+
+    /// Tolerant decoding so conversations saved by older versions keep loading.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        role = try c.decode(Role.self, forKey: .role)
+        content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
+        toolCalls = try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []
+        toolCallId = try c.decodeIfPresent(String.self, forKey: .toolCallId)
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        isError = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+        reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning) ?? ""
+        images = try c.decodeIfPresent([String].self, forKey: .images) ?? []
+    }
 }
 
 struct Conversation: Codable, Identifiable, Hashable {

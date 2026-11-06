@@ -136,16 +136,40 @@ final class AppStore: ObservableObject {
 
     func isRunning(_ id: UUID) -> Bool { runningIDs.contains(id) }
 
-    func send(_ text: String, in id: UUID) {
+    func send(_ text: String, images: [String] = [], in id: UUID) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isRunning(id),
+        guard !trimmed.isEmpty || !images.isEmpty, !isRunning(id),
               let i = conversations.firstIndex(where: { $0.id == id }) else { return }
         if conversations[i].messages.isEmpty || conversations[i].title == Conversation.defaultTitle {
             let firstLine = trimmed.components(separatedBy: .newlines).first ?? trimmed
-            conversations[i].title = String(firstLine.prefix(30))
+            conversations[i].title = firstLine.isEmpty ? "图片" : String(firstLine.prefix(30))
         }
-        conversations[i].messages.append(ChatMessage(role: .user, content: trimmed))
+        conversations[i].messages.append(ChatMessage(role: .user, content: trimmed, images: images))
         touch(id)
+        saveConversations()
+        start(id)
+    }
+
+    /// Drops everything after the user turn that produced `messageID` and runs again.
+    func regenerate(_ messageID: UUID, in id: UUID) {
+        guard !isRunning(id), let ci = conversations.firstIndex(where: { $0.id == id }),
+              let mi = conversations[ci].messages.firstIndex(where: { $0.id == messageID }) else { return }
+        let msgs = conversations[ci].messages
+        guard let ui = msgs[...mi].lastIndex(where: { $0.role == .user }) else { return }
+        conversations[ci].messages.removeSubrange((ui + 1)...)
+        saveConversations()
+        start(id)
+    }
+
+    /// Replaces a user message's text, discards the replies after it, and runs again.
+    func edit(_ messageID: UUID, newText: String, in id: UUID) {
+        let t = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isRunning(id), let ci = conversations.firstIndex(where: { $0.id == id }),
+              let mi = conversations[ci].messages.firstIndex(where: { $0.id == messageID }),
+              conversations[ci].messages[mi].role == .user,
+              !t.isEmpty || !conversations[ci].messages[mi].images.isEmpty else { return }
+        conversations[ci].messages[mi].content = t
+        conversations[ci].messages.removeSubrange((mi + 1)...)
         saveConversations()
         start(id)
     }
@@ -294,6 +318,8 @@ final class AppStore: ObservableObject {
                     switch ev {
                     case .text(let t):
                         mutate(id, assistant.id) { $0.content += t }
+                    case .reasoning(let r):
+                        mutate(id, assistant.id) { $0.reasoning += r }
                     case .toolCall(let tc):
                         calls.append(tc)
                         mutate(id, assistant.id) { $0.toolCalls.append(tc) }

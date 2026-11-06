@@ -19,6 +19,9 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Unit tests
+        run: swift test
+
       - name: Build & package
         run: |
           chmod +x scripts/bundle.sh

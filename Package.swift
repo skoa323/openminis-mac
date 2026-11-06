@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "OpenMinisMac",
             path: "Sources/OpenMinisMac"
+        ),
+        .testTarget(
+            name: "OpenMinisMacTests",
+            dependencies: ["OpenMinisMac"],
+            path: "Tests/OpenMinisMacTests"
         )
     ]
 )

@@ -8,6 +8,7 @@ struct ToolSpec {
 
 enum LLMEvent {
     case text(String)
+    case reasoning(String)
     case toolCall(ToolCall)
 }
 
@@ -117,6 +118,9 @@ struct OpenAIClient: LLMClient {
                 if let text = delta["content"] as? String, !text.isEmpty {
                     cont.yield(.text(text))
                 }
+                for key in ["reasoning_content", "reasoning"] {
+                    if let r = delta[key] as? String, !r.isEmpty { cont.yield(.reasoning(r)); break }
+                }
                 if let calls = delta["tool_calls"] as? [[String: Any]] {
                     for c in calls {
                         let idx = (c["index"] as? Int) ?? partials.count
@@ -144,10 +148,23 @@ struct OpenAIClient: LLMClient {
         for m in messages {
             switch m.role {
             case .user:
-                msgs.append(["role": "user", "content": m.content])
+                if m.images.isEmpty {
+                    msgs.append(["role": "user", "content": m.content])
+                } else {
+                    var parts: [[String: Any]] = []
+                    if !m.content.isEmpty { parts.append(["type": "text", "text": m.content]) }
+                    for name in m.images {
+                        guard let b64 = Attachments.base64(name) else { continue }
+                        let iu: [String: Any] = ["url": "data:image/jpeg;base64,\(b64)"]
+                        parts.append(["type": "image_url", "image_url": iu])
+                    }
+                    msgs.append(["role": "user", "content": parts])
+                }
             case .assistant:
                 var d: [String: Any] = ["role": "assistant"]
                 d["content"] = m.content.isEmpty ? NSNull() : m.content
+                // Thinking models (Kimi, DeepSeek) expect their reasoning back alongside tool calls.
+                if !m.reasoning.isEmpty && !m.toolCalls.isEmpty { d["reasoning_content"] = m.reasoning }
                 if !m.toolCalls.isEmpty {
                     d["tool_calls"] = m.toolCalls.map { tc -> [String: Any] in
                         let fn: [String: Any] = ["name": tc.name, "arguments": tc.arguments]
@@ -223,6 +240,9 @@ struct AnthropicClient: LLMClient {
                     if let text = delta["text"] as? String, !text.isEmpty {
                         cont.yield(.text(text))
                     }
+                    if let th = delta["thinking"] as? String, !th.isEmpty {
+                        cont.yield(.reasoning(th))
+                    }
                     if let pj = delta["partial_json"] as? String {
                         blocks[index]?.json += pj
                     }
@@ -257,7 +277,14 @@ struct AnthropicClient: LLMClient {
         for m in messages {
             switch m.role {
             case .user:
-                append(role: "user", blocks: [["type": "text", "text": m.content]])
+                var blocks: [[String: Any]] = []
+                for name in m.images {
+                    guard let b64 = Attachments.base64(name) else { continue }
+                    let src: [String: Any] = ["type": "base64", "media_type": "image/jpeg", "data": b64]
+                    blocks.append(["type": "image", "source": src])
+                }
+                if !m.content.isEmpty || blocks.isEmpty { blocks.append(["type": "text", "text": m.content.isEmpty ? " " : m.content]) }
+                append(role: "user", blocks: blocks)
             case .assistant:
                 var blocks: [[String: Any]] = []
                 if !m.content.isEmpty { blocks.append(["type": "text", "text": m.content]) }

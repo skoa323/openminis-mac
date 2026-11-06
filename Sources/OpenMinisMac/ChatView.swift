@@ -1,10 +1,13 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @EnvironmentObject var store: AppStore
     let conversationID: UUID
     @State private var draft = ""
+    @State private var pendingImages: [String] = []
+    @State private var dropTargeted = false
 
     private var conversation: Conversation? { store.conversation(conversationID) }
     private var running: Bool { store.isRunning(conversationID) }
@@ -18,11 +21,14 @@ struct ChatView: View {
         let visible = messages.filter { m in
             switch m.role {
             case .user: return true
-            case .assistant: return !(m.content.isEmpty && m.toolCalls.isEmpty)
+            case .assistant: return !(m.content.isEmpty && m.toolCalls.isEmpty && m.reasoning.isEmpty)
             default: return false
             }
         }
-        let lastAssistantEmpty = messages.last.map { $0.role != .assistant || ($0.content.isEmpty && $0.toolCalls.isEmpty) } ?? true
+        let lastID = messages.last?.id
+        let lastAssistantEmpty = messages.last.map {
+            $0.role != .assistant || ($0.content.isEmpty && $0.toolCalls.isEmpty && $0.reasoning.isEmpty)
+        } ?? true
 
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -32,7 +38,10 @@ struct ChatView: View {
                             EmptyChatHint()
                         }
                         ForEach(visible) { m in
-                            MessageRow(message: m, results: results)
+                            MessageRow(message: m,
+                                       results: results,
+                                       conversationID: conversationID,
+                                       streaming: running && m.id == lastID)
                                 .id(m.id)
                         }
                         if running && (lastAssistantEmpty || store.approval(for: conversationID) == nil && messages.last?.role == .tool) {
@@ -49,7 +58,7 @@ struct ChatView: View {
                 .onChange(of: messages.count) { _, _ in
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
-                .onChange(of: messages.last?.content.count ?? 0) { _, _ in
+                .onChange(of: (messages.last?.content.count ?? 0) + (messages.last?.reasoning.count ?? 0)) { _, _ in
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
                 .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -60,16 +69,56 @@ struct ChatView: View {
             }
 
             Divider()
-            InputBar(draft: $draft, running: running, onSend: send, onStop: { store.stop(conversationID) })
+            InputBar(draft: $draft,
+                     images: $pendingImages,
+                     running: running,
+                     onSend: send,
+                     onStop: { store.stop(conversationID) })
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                    .background(Color.accentColor.opacity(0.06))
+                    .overlay(Label("松开以添加图片", systemImage: "photo.badge.plus").font(.title3))
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted) { providers in
+            handleDrop(providers)
         }
         .navigationTitle(conversation?.title ?? "OpenMinis")
     }
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !running else { return }
+        guard !text.isEmpty || !pendingImages.isEmpty, !running else { return }
+        let imgs = pendingImages
         draft = ""
-        store.send(text, in: conversationID)
+        pendingImages = []
+        store.send(text, images: imgs, in: conversationID)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for p in providers {
+            if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                handled = true
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, Attachments.imageExtensions.contains(url.pathExtension.lowercased()),
+                          let name = Attachments.save(fileURL: url) else { return }
+                    DispatchQueue.main.async { pendingImages.append(name) }
+                }
+            } else if p.canLoadObject(ofClass: NSImage.self) {
+                handled = true
+                _ = p.loadObject(ofClass: NSImage.self) { obj, _ in
+                    guard let img = obj as? NSImage, let name = Attachments.save(img) else { return }
+                    DispatchQueue.main.async { pendingImages.append(name) }
+                }
+            }
+        }
+        return handled
     }
 }
 
@@ -81,7 +130,7 @@ struct EmptyChatHint: View {
                 .foregroundStyle(.secondary)
             Text("OpenMinis for Mac")
                 .font(.title2.bold())
-            Text("我可以在这台 Mac 上运行命令、读写文件、抓取网页。\n直接告诉我要做什么。")
+            Text("我可以在这台 Mac 上运行命令、读写文件、抓取网页。\n直接告诉我要做什么，也可以粘贴或拖入图片。")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
@@ -92,40 +141,231 @@ struct EmptyChatHint: View {
 
 // MARK: - Messages
 
+func copyToPasteboard(_ s: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(s, forType: .string)
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     let results: [String: ChatMessage]
+    let conversationID: UUID
+    let streaming: Bool
 
     var body: some View {
         if message.role == .user {
-            HStack {
-                Spacer(minLength: 80)
-                Text(message.content)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.accentColor.opacity(0.18))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
+            UserBubble(message: message, conversationID: conversationID)
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                if !message.content.isEmpty {
-                    if message.isError {
-                        Label(message.content, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(Color.red)
-                            .textSelection(.enabled)
-                    } else {
-                        MarkdownText(text: message.content)
-                    }
-                }
-                ForEach(message.toolCalls) { tc in
-                    ToolCallView(call: tc, result: results[tc.id])
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            AssistantRow(message: message, results: results, conversationID: conversationID, streaming: streaming)
         }
     }
 }
+
+struct UserBubble: View {
+    @EnvironmentObject var store: AppStore
+    let message: ChatMessage
+    let conversationID: UUID
+    @State private var editing = false
+    @State private var editText = ""
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top) {
+            Spacer(minLength: 80)
+            VStack(alignment: .trailing, spacing: 6) {
+                if !message.images.isEmpty {
+                    ImageStrip(names: message.images, size: 120)
+                }
+                if editing {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        TextEditor(text: $editText)
+                            .font(.body)
+                            .frame(minWidth: 320, minHeight: 60, maxHeight: 240)
+                            .padding(4)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.3)))
+                        HStack {
+                            Button("取消") { editing = false }
+                                .keyboardShortcut(.cancelAction)
+                            Button("保存并重新发送") {
+                                editing = false
+                                store.edit(message.id, newText: editText, in: conversationID)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && message.images.isEmpty)
+                        }
+                    }
+                } else if !message.content.isEmpty {
+                    Text(message.content)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.accentColor.opacity(0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                if !editing {
+                    HStack(spacing: 10) {
+                        Button { copyToPasteboard(message.content) } label: { Image(systemName: "doc.on.doc") }
+                            .help("复制")
+                        Button { startEdit() } label: { Image(systemName: "pencil") }
+                            .help("编辑")
+                            .disabled(store.isRunning(conversationID))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .opacity(hovering ? 1 : 0)
+                }
+            }
+        }
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("复制") { copyToPasteboard(message.content) }
+            Button("编辑") { startEdit() }.disabled(store.isRunning(conversationID))
+        }
+    }
+
+    private func startEdit() {
+        editText = message.content
+        editing = true
+    }
+}
+
+struct AssistantRow: View {
+    @EnvironmentObject var store: AppStore
+    let message: ChatMessage
+    let results: [String: ChatMessage]
+    let conversationID: UUID
+    let streaming: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.reasoning.isEmpty {
+                ReasoningView(text: message.reasoning,
+                              live: streaming && message.content.isEmpty && message.toolCalls.isEmpty)
+            }
+            if !message.content.isEmpty {
+                if message.isError {
+                    Label(message.content, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Color.red)
+                        .textSelection(.enabled)
+                } else {
+                    MarkdownText(text: message.content)
+                }
+            }
+            ForEach(message.toolCalls) { tc in
+                ToolCallView(call: tc, result: results[tc.id])
+            }
+            if !streaming && (!message.content.isEmpty || message.isError) {
+                HStack(spacing: 12) {
+                    Button { copyToPasteboard(message.content) } label: { Image(systemName: "doc.on.doc") }
+                        .help("复制")
+                    Button { store.regenerate(message.id, in: conversationID) } label: { Image(systemName: "arrow.clockwise") }
+                        .help("重新生成")
+                        .disabled(store.isRunning(conversationID))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+                .opacity(hovering ? 1 : 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onHover { hovering = $0 }
+        .contextMenu {
+            Button("复制") { copyToPasteboard(message.content) }
+            Button("重新生成") { store.regenerate(message.id, in: conversationID) }
+                .disabled(store.isRunning(conversationID))
+        }
+    }
+}
+
+/// Collapsible reasoning block; open while the model is still thinking, collapsed afterwards
+/// unless the user toggled it.
+struct ReasoningView: View {
+    let text: String
+    let live: Bool
+    @State private var userExpanded: Bool? = nil
+
+    private var expanded: Bool { userExpanded ?? live }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                userExpanded = !expanded
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .frame(width: 10)
+                    Image(systemName: "brain")
+                    Text(live ? "思考中…" : "思考过程")
+                        .font(.callout)
+                    if live { ProgressView().controlSize(.mini) }
+                    Spacer()
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color.secondary.opacity(0.3)).frame(width: 2)
+                    }
+            }
+        }
+    }
+}
+
+/// Thumbnails of stored attachments; click opens the full image in Preview.
+struct ImageStrip: View {
+    let names: [String]
+    var size: CGFloat = 80
+    var onRemove: ((String) -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(names, id: \.self) { name in
+                ZStack(alignment: .topTrailing) {
+                    Group {
+                        if let img = Attachments.image(name) {
+                            Image(nsImage: img).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: "photo").foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+                    .onTapGesture { NSWorkspace.shared.open(Attachments.url(name)) }
+                    .help("点击用预览打开")
+
+                    if let onRemove {
+                        Button { onRemove(name) } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, .black.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(3)
+                        .help("移除")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Tool calls
 
 struct ToolCallView: View {
     let call: ToolCall
@@ -139,7 +379,7 @@ struct ToolCallView: View {
         case "write_file", "edit_file": return "square.and.pencil"
         case "list_dir": return "folder"
         case "web_fetch": return "globe"
-        case "memory_write": return "brain"
+        case "memory_write", "memory_get": return "brain"
         default: return "wrench"
         }
     }
@@ -152,7 +392,7 @@ struct ToolCallView: View {
 
     private var summary: String {
         let a = args
-        for key in ["command", "path", "url", "content"] {
+        for key in ["command", "path", "url", "query", "content"] {
             if let s = a[key] as? String, !s.isEmpty {
                 return s.replacingOccurrences(of: "\n", with: " ")
             }
@@ -257,72 +497,138 @@ struct ApprovalBar: View {
 
 struct InputBar: View {
     @Binding var draft: String
+    @Binding var images: [String]
     let running: Bool
     let onSend: () -> Void
     let onStop: () -> Void
 
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty
+    }
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            ZStack(alignment: .topLeading) {
-                ChatInputView(text: $draft, onSubmit: onSend)
-                    .frame(height: 64)
-                if draft.isEmpty {
-                    Text("给 OpenMinis 发消息（Return 发送，Shift+Return 换行）")
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 5)
-                        .padding(.top, 1)
-                        .allowsHitTesting(false)
+        VStack(alignment: .leading, spacing: 8) {
+            if !images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    ImageStrip(names: images, size: 56) { name in
+                        images.removeAll { $0 == name }
+                    }
                 }
             }
-            .padding(8)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
+            HStack(alignment: .bottom, spacing: 10) {
+                Button(action: pickImages) {
+                    Image(systemName: "paperclip").font(.system(size: 18))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("添加图片（也可以粘贴或拖入）")
+                .padding(.bottom, 6)
 
-            if running {
-                Button(action: onStop) {
-                    Image(systemName: "stop.circle.fill").font(.system(size: 26))
+                ZStack(alignment: .topLeading) {
+                    ChatInputView(text: $draft, onSubmit: onSend, onPasteImages: { names in
+                        images.append(contentsOf: names)
+                    })
+                    .frame(height: 64)
+                    if draft.isEmpty {
+                        Text("给 OpenMinis 发消息（Return 发送，Shift+Return 换行）")
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 5)
+                            .padding(.top, 1)
+                            .allowsHitTesting(false)
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("停止")
-            } else {
-                Button(action: onSend) {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 26))
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
+
+                if running {
+                    Button(action: onStop) {
+                        Image(systemName: "stop.circle.fill").font(.system(size: 26))
+                    }
+                    .buttonStyle(.plain)
+                    .help("停止")
+                } else {
+                    Button(action: onSend) {
+                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 26))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .help("发送")
                 }
-                .buttonStyle(.plain)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("发送")
             }
         }
         .padding(12)
     }
+
+    private func pickImages() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK else { return }
+        images.append(contentsOf: panel.urls.compactMap { Attachments.save(fileURL: $0) })
+    }
 }
 
-/// NSTextView wrapper: Return sends, Shift/Option+Return inserts a newline,
+/// NSTextView subclass that turns pasted images into attachments instead of rich text.
+final class ChatTextView: NSTextView {
+    var onPasteImages: (([String]) -> Void)?
+
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        let hasPlainText = pb.string(forType: .string) != nil
+        let hasFiles = pb.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        if !hasPlainText || hasFiles {
+            let names = Attachments.importImages(from: pb)
+            if !names.isEmpty {
+                onPasteImages?(names)
+                return
+            }
+        }
+        pasteAsPlainText(sender)
+    }
+}
+
+/// Return sends, Shift/Option+Return inserts a newline,
 /// and IME composition (e.g. Chinese pinyin) is never interrupted.
 struct ChatInputView: NSViewRepresentable {
     @Binding var text: String
     var onSubmit: () -> Void
+    var onPasteImages: ([String]) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
+        let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.borderType = .noBorder
-        if let tv = scroll.documentView as? NSTextView {
-            tv.delegate = context.coordinator
-            tv.isRichText = false
-            tv.allowsUndo = true
-            tv.drawsBackground = false
-            tv.font = NSFont.systemFont(ofSize: NSFont.systemFontSize + 1)
-            tv.textContainerInset = NSSize(width: 0, height: 2)
-            tv.isAutomaticQuoteSubstitutionEnabled = false
-            tv.isAutomaticDashSubstitutionEnabled = false
-            tv.string = text
-            DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
-        }
+        scroll.autohidesScrollers = true
+
+        let tv = ChatTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 64))
+        tv.minSize = NSSize(width: 0, height: 0)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+
+        tv.delegate = context.coordinator
+        tv.onPasteImages = { names in context.coordinator.parent.onPasteImages(names) }
+        tv.isRichText = false
+        tv.importsGraphics = false
+        tv.allowsUndo = true
+        tv.drawsBackground = false
+        tv.font = NSFont.systemFont(ofSize: NSFont.systemFontSize + 1)
+        tv.textContainerInset = NSSize(width: 0, height: 2)
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.string = text
+
+        scroll.documentView = tv
+        DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
         return scroll
     }
 
