@@ -17,6 +17,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var approvals: [PendingApproval] = []
     @Published var folders: [ChatFolder] = AppStore.loadFolders()
     @Published var titlingIDs: Set<UUID> = []
+    @Published var skills: [SkillMeta] = []
     /// Bumped to ask the sidebar search field to take focus (⇧⌘F).
     @Published var sidebarSearchFocus = 0
     /// In-chat find commands from the menu (⌘F / ⌘G / ⇧⌘G); serial makes repeats observable.
@@ -34,6 +35,8 @@ final class AppStore: ObservableObject {
         if conversations.isEmpty { conversations = [Conversation()] }
         selectedID = conversations.first?.id
         try? FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+        MemoryStore.migrateLegacy(AppStore.memoryFile)
+        reloadSkills()
     }
 
     // MARK: - Paths & persistence
@@ -344,32 +347,41 @@ final class AppStore: ObservableObject {
 
     // MARK: - Agent loop
 
-    private func systemPrompt() -> String {
+    private func systemPrompt(_ id: UUID) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm EEEE"
         let osv = ProcessInfo.processInfo.operatingSystemVersionString
-        var p = """
-        你是 OpenMinis，一个运行在用户 Mac 上的 AI 助手（原生 macOS 版）。
-        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页、写入长期记忆。
+        let soul = SoulStore.load()
+        let mem = memoryEnabled(id)
+        var p = soul.identitySection()
+        p += """
+
+
+        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页\(mem ? "、读写长期记忆（memory_write / memory_get）" : "")。
 
         环境：
         - 系统：macOS \(osv)
         - 用户主目录：\(NSHomeDirectory())
         - 工作区（shell 的默认目录，相对路径以此为基准）：\(workspaceURL.path)
+        - 记忆目录：\(MemoryStore.root.path)（GLOBAL.md 全局记忆、YYYY-MM-DD.md 每日日志、SOUL.md 人格）
+        - 技能目录：\(SkillLibrary.root.path)（每个技能一个子目录，含 SKILL.md）
         - 当前时间：\(f.string(from: Date()))
 
         原则：
         - 能用工具完成的事就直接做，不要只给建议。
         - 删除文件、覆盖重要数据、修改系统设置等不可逆操作，先向用户说明并确认。
         - 回答简洁，使用用户的语言。
-        - 发现用户偏好或重要约定时，用 memory_write 记下来。
+
+        记忆规则：
+        - 用 memory_write 记录用户偏好、项目约定、可复用的知识；不要记录密码、API Key 等机密，除非用户被提醒后明确确认。
+        - GLOBAL.md 只在用户明确要求「全局记住」时才用 edit_file / write_file 修改，写之前先去重整理。
+        - 新话题开始时可以先用 memory_get 查一下相关记忆。
         """
-        if let mem = try? String(contentsOf: AppStore.memoryFile, encoding: .utf8),
-           !mem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            p += "\n\n以下是你之前记下的长期记忆：\n" + String(mem.suffix(8000))
-        }
         let custom = settings.customPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !custom.isEmpty { p += "\n\n用户的附加指示：\n" + custom }
+        p += SkillLibrary.promptFragment(enabledSkills(id))
+        if mem { p += MemoryStore.promptFragment() }
+        p += MemoryStore.statusFragment(enabled: mem)
         return p
     }
 
@@ -430,11 +442,15 @@ final class AppStore: ObservableObject {
         let requested = thinking(for: id)
 
         try? FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-        let runner = ToolRunner(workspace: workspaceURL, memoryFile: AppStore.memoryFile) { [weak self] cmd in
+        let mem = memoryEnabled(id)
+        let runner = ToolRunner(workspace: workspaceURL, memoryEnabled: mem,
+                                onSkillFile: { [weak self] sid, wrote in
+                                    Task { @MainActor in self?.skillTouched(sid, wrote: wrote) }
+                                }) { [weak self] cmd in
             guard let self else { return false }
             return await self.requestApproval(cmd, conversation: id)
         }
-        let specs = ToolRunner.specs
+        let specs = ToolRunner.specs(memory: mem)
         var ci = 0   // current candidate; sticks across tool iterations once a fallback happened
 
         for _ in 0..<max(1, settings.maxIterations) {
@@ -459,7 +475,7 @@ final class AppStore: ObservableObject {
                 let ctx = RequestContext(instance: inst, entry: e, apiKey: inst.apiKey,
                                          thinking: e.effectiveThinking(requested))
                 do {
-                    let stream = makeClient(ctx).stream(system: systemPrompt(),
+                    let stream = makeClient(ctx).stream(system: systemPrompt(id),
                                                         messages: apiHistory(id, limit: g.contextLimitTokens),
                                                         tools: specs)
                     for try await ev in stream {

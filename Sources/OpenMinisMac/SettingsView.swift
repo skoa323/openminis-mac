@@ -8,8 +8,20 @@ struct SettingsView: View {
                 .tabItem { Label("模型服务", systemImage: "cpu") }
             GroupsSettings()
                 .tabItem { Label("模型分组", systemImage: "square.stack.3d.up") }
+            MemorySettings()
+                .tabItem { Label("记忆", systemImage: "brain") }
+            SoulSettings()
+                .tabItem { Label("人格", systemImage: "person.crop.circle") }
+            SkillsSettings()
+                .tabItem { Label("技能", systemImage: "puzzlepiece") }
             UsageSettings()
                 .tabItem { Label("用量", systemImage: "chart.bar") }
+            MemorySettings()
+                .tabItem { Label("记忆", systemImage: "brain") }
+            SoulSettings()
+                .tabItem { Label("人格", systemImage: "person.crop.circle") }
+            SkillsSettings()
+                .tabItem { Label("技能", systemImage: "puzzlepiece.extension") }
             GeneralSettings()
                 .tabItem { Label("通用", systemImage: "gearshape") }
         }

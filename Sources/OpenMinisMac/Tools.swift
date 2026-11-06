@@ -15,13 +15,18 @@ private final class DataBox: @unchecked Sendable {
 
 final class ToolRunner {
     let workspace: URL
-    let memoryFile: URL
+    let memoryEnabled: Bool
     /// Called before running a shell command. Return false to reject.
     let approve: (String) async -> Bool
+    /// Called after a skill's SKILL.md is read (`write == false`) or written/edited (`write == true`).
+    let onSkillFile: (String, Bool) -> Void
 
-    init(workspace: URL, memoryFile: URL, approve: @escaping (String) async -> Bool) {
+    init(workspace: URL, memoryEnabled: Bool = true,
+         onSkillFile: @escaping (String, Bool) -> Void = { _, _ in },
+         approve: @escaping (String) async -> Bool) {
         self.workspace = workspace
-        self.memoryFile = memoryFile
+        self.memoryEnabled = memoryEnabled
+        self.onSkillFile = onSkillFile
         self.approve = approve
     }
 
@@ -29,7 +34,9 @@ final class ToolRunner {
 
     // MARK: - Specs
 
-    static var specs: [ToolSpec] {
+    static var specs: [ToolSpec] { specs(memory: true) }
+
+    static func specs(memory: Bool) -> [ToolSpec] {
         func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] {
             ["type": "object", "properties": props, "required": required]
         }
@@ -37,7 +44,7 @@ final class ToolRunner {
         func int(_ d: String) -> [String: Any] { ["type": "integer", "description": d] }
         func bool(_ d: String) -> [String: Any] { ["type": "boolean", "description": d] }
 
-        return [
+        let base: [ToolSpec] = [
             ToolSpec(name: "shell",
                      description: "在本机 macOS 上用 /bin/zsh 执行命令，工作目录为工作区。返回 stdout、stderr 和退出码。",
                      parameters: obj(["command": str("要执行的 shell 命令"),
@@ -62,9 +69,17 @@ final class ToolRunner {
             ToolSpec(name: "web_fetch",
                      description: "HTTP GET 获取网页或 API 内容，HTML 会转为纯文本。",
                      parameters: obj(["url": str("http(s) 地址")], ["url"])),
+        ]
+        guard memory else { return base }
+        return base + [
             ToolSpec(name: "memory_write",
-                     description: "把值得长期记住的信息（用户偏好、项目约定等）追加到记忆文件，之后每次对话都会带上。",
-                     parameters: obj(["content": str("要记住的内容，简洁")], ["content"])),
+                     description: "Write a memory entry to today's daily log (YYYY-MM-DD.md). Memories persist across all sessions. Each entry is prepended with a timestamp. Save: user preferences, recurring patterns, key facts, project conventions, reusable knowledge. Avoid saving passwords, API keys, tokens, or secrets unless the user explicitly confirms after being warned. Keep entries concise and general-purpose. GLOBAL.md is read-only (user-maintained via Settings).",
+                     parameters: obj(["content": str("The memory content to write. Use concise Markdown with a short heading (## Topic).")], ["content"])),
+            ToolSpec(name: "memory_get",
+                     description: "Retrieve memories from persistent storage. Keyword search over memory entries (any keyword matching counts); results ranked by 50% keyword coverage + 50% recency. Empty keywords returns full files.",
+                     parameters: obj(["keywords": str("Space-separated keywords; empty = return full memory files"),
+                                      "scope": ["type": "string", "enum": ["daily", "all"], "description": "daily = daily logs only, all = daily logs + GLOBAL.md (default)"]], [])),
+        ])),
         ]
     }
 
@@ -80,7 +95,11 @@ final class ToolRunner {
             case "edit_file": return try editFile(args)
             case "list_dir": return try listDir(args)
             case "web_fetch": return try await webFetch(args)
-            case "memory_write": return try memoryWrite(args)
+            case "memory_write", "memory_get":
+                guard memoryEnabled else {
+                    return ToolResult(output: "Memory is disabled for this session. Use /memory to re-enable.", isError: true)
+                }
+                return call.name == "memory_write" ? try memoryWrite(args) : memoryGet(args)
             default: return ToolResult(output: "未知工具：\(call.name)", isError: true)
             }
         } catch {
@@ -186,6 +205,7 @@ final class ToolRunner {
 
     private func readFile(_ args: [String: Any]) throws -> ToolResult {
         let url = resolve(try string(args, "path"))
+        if let sid = SkillLibrary.skillID(forPath: url.path) { onSkillFile(sid, false) }
         let data = try Data(contentsOf: url)
         guard let text = String(data: data, encoding: .utf8) else {
             return ToolResult(output: "不是 UTF-8 文本文件（\(data.count) 字节）", isError: true)
@@ -205,6 +225,7 @@ final class ToolRunner {
 
     private func writeFile(_ args: [String: Any]) throws -> ToolResult {
         let url = resolve(try string(args, "path"))
+        defer { if url.path.hasPrefix(SkillLibrary.root.path + "/") { onSkillFile(SkillLibrary.skillID(forPath: url.path) ?? "", true) } }
         let content = try string(args, "content")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
@@ -213,6 +234,7 @@ final class ToolRunner {
 
     private func editFile(_ args: [String: Any]) throws -> ToolResult {
         let url = resolve(try string(args, "path"))
+        defer { if url.path.hasPrefix(SkillLibrary.root.path + "/") { onSkillFile(SkillLibrary.skillID(forPath: url.path) ?? "", true) } }
         let old = try string(args, "old_string")
         let new = try string(args, "new_string")
         let all = (args["replace_all"] as? Bool) ?? false
@@ -295,21 +317,15 @@ final class ToolRunner {
     // MARK: - memory
 
     private func memoryWrite(_ args: [String: Any]) throws -> ToolResult {
-        let content = try string(args, "content").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return ToolResult(output: "内容为空", isError: true) }
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm"
-        let entry = "\n- [\(f.string(from: Date()))] \(content)\n"
-        let fm = FileManager.default
-        try fm.createDirectory(at: memoryFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: memoryFile.path) {
-            try "# OpenMinis 记忆\n".write(to: memoryFile, atomically: true, encoding: .utf8)
-        }
-        let h = try FileHandle(forWritingTo: memoryFile)
-        defer { try? h.close() }
-        try h.seekToEnd()
-        try h.write(contentsOf: Data(entry.utf8))
-        return ToolResult(output: "已记住。")
+        let content = (args["content"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return ToolResult(output: "Error: Missing required 'content' parameter", isError: true) }
+        let file = try MemoryStore.write(content)
+        return ToolResult(output: "Memory saved to \(file) (\(content.count) chars)")
+    }
+
+    private func memoryGet(_ args: [String: Any]) -> ToolResult {
+        ToolResult(output: MemoryStore.get(keywords: args["keywords"] as? String ?? "",
+                                           scope: args["scope"] as? String ?? "all"))
     }
 }
 

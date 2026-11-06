@@ -162,6 +162,7 @@ struct ChatView: View {
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pendingImages.isEmpty, !running else { return }
+        if pendingImages.isEmpty, store.handleSlash(text, in: conversationID) { draft = ""; return }
         let imgs = pendingImages
         draft = ""
         pendingImages = []
@@ -532,6 +533,11 @@ struct ToolCallView: View {
         .padding(10)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contextMenu {
+            if call.name == "memory_write", let c = args["content"] as? String {
+                Button("撤销这条记忆") { _ = MemoryStore.revoke(c) }
+            }
+        }
     }
 }
 

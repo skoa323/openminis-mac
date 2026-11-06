@@ -84,13 +84,18 @@ struct Conversation: Codable, Identifiable, Hashable {
     var pinnedAt: Date? = nil
     var folderID: UUID? = nil
     var icon: String? = nil
+    /// nil = follow the global default (upstream sessions.memory_enabled).
+    var memoryEnabled: Bool? = nil
+    /// Per-session skill switches; absent = follow the skill's global switch.
+    var skillOverrides: [String: Bool] = [:]
 
     var isPinned: Bool { pinnedAt != nil }
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, updatedAt, groupID, thinkingLevel, pinnedAt, folderID, icon
+        case id, title, messages, createdAt, updatedAt, groupID, thinkingLevel, pinnedAt, folderID, icon,
+             memoryEnabled, skillOverrides
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -104,6 +109,8 @@ struct Conversation: Codable, Identifiable, Hashable {
         pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         folderID = try c.decodeIfPresent(UUID.self, forKey: .folderID)
         icon = try c.decodeIfPresent(String.self, forKey: .icon)
+        memoryEnabled = try c.decodeIfPresent(Bool.self, forKey: .memoryEnabled)
+        skillOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .skillOverrides) ?? [:]
     }
 }
 
@@ -152,12 +159,13 @@ struct AppSettings: Codable {
     var confirmShell: Bool = true
     var maxIterations: Int = 40
     var autoTitle: Bool = true
+    var memoryDefault: Bool = true
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case instances, entries, groups, activeGroupID, defaultThinkingLevel,
-             customPrompt, workspacePath, confirmShell, maxIterations, autoTitle,
+             customPrompt, workspacePath, confirmShell, maxIterations, autoTitle, memoryDefault,
              profiles, activeProfileID // legacy
     }
 
@@ -173,6 +181,7 @@ struct AppSettings: Codable {
         confirmShell = try c.decodeIfPresent(Bool.self, forKey: .confirmShell) ?? true
         maxIterations = try c.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 40
         autoTitle = try c.decodeIfPresent(Bool.self, forKey: .autoTitle) ?? true
+        memoryDefault = try c.decodeIfPresent(Bool.self, forKey: .memoryDefault) ?? true
 
         if instances.isEmpty, let legacy = try? c.decodeIfPresent([LegacyProfile].self, forKey: .profiles), !legacy.isEmpty {
             let activeLegacy = try? c.decodeIfPresent(UUID.self, forKey: .activeProfileID)
@@ -192,6 +201,7 @@ struct AppSettings: Codable {
         try c.encode(confirmShell, forKey: .confirmShell)
         try c.encode(maxIterations, forKey: .maxIterations)
         try c.encode(autoTitle, forKey: .autoTitle)
+        try c.encode(memoryDefault, forKey: .memoryDefault)
     }
 
     /// Each old profile becomes an instance with the SAME id (so its Keychain key keeps working),

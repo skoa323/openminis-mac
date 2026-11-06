@@ -21,6 +21,9 @@ struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 ModelControls()
             }
+            ToolbarItem(placement: .primaryAction) {
+                if let cid = store.selectedID { SessionExtrasButton(conversationID: cid) }
+            }
         }
     }
 }
