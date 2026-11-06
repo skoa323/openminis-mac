@@ -31,6 +31,17 @@ struct OpenMinisMacApp: App {
                 Button("新对话") { store.newConversation() }
                     .keyboardShortcut("n", modifiers: .command)
             }
+            CommandGroup(after: .textEditing) {
+                Divider()
+                Button("在对话中查找") { store.sendFind(.open) }
+                    .keyboardShortcut("f", modifiers: .command)
+                Button("查找下一个") { store.sendFind(.next) }
+                    .keyboardShortcut("g", modifiers: .command)
+                Button("查找上一个") { store.sendFind(.previous) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                Button("搜索所有对话") { store.sidebarSearchFocus += 1 }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+            }
         }
 
         Settings {

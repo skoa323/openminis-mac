@@ -80,11 +80,17 @@ struct Conversation: Codable, Identifiable, Hashable {
     /// Per-conversation overrides; nil = follow the global defaults.
     var groupID: UUID? = nil
     var thinkingLevel: ThinkingLevel? = nil
+    /// Session management (upstream ChatSession.pinnedAt / folderId / category).
+    var pinnedAt: Date? = nil
+    var folderID: UUID? = nil
+    var icon: String? = nil
+
+    var isPinned: Bool { pinnedAt != nil }
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, updatedAt, groupID, thinkingLevel
+        case id, title, messages, createdAt, updatedAt, groupID, thinkingLevel, pinnedAt, folderID, icon
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -95,6 +101,34 @@ struct Conversation: Codable, Identifiable, Hashable {
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         groupID = try c.decodeIfPresent(UUID.self, forKey: .groupID)
         thinkingLevel = try? c.decodeIfPresent(ThinkingLevel.self, forKey: .thinkingLevel)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        folderID = try c.decodeIfPresent(UUID.self, forKey: .folderID)
+        icon = try c.decodeIfPresent(String.self, forKey: .icon)
+    }
+}
+
+/// Sidebar folder (upstream ChatFolder; called "Group" in the iOS UI).
+struct ChatFolder: Codable, Identifiable, Hashable {
+    var id: UUID = UUID()
+    var name: String
+    var icon: String? = nil
+    var pinnedAt: Date? = nil
+    var desc: String = ""
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+
+    init(name: String, icon: String? = nil) { self.name = name; self.icon = icon }
+
+    private enum CodingKeys: String, CodingKey { case id, name, icon, pinnedAt, desc, createdAt, updatedAt }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "分组"
+        icon = try c.decodeIfPresent(String.self, forKey: .icon)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        desc = try c.decodeIfPresent(String.self, forKey: .desc) ?? ""
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -117,12 +151,13 @@ struct AppSettings: Codable {
     var workspacePath: String = NSHomeDirectory() + "/OpenMinis"
     var confirmShell: Bool = true
     var maxIterations: Int = 40
+    var autoTitle: Bool = true
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case instances, entries, groups, activeGroupID, defaultThinkingLevel,
-             customPrompt, workspacePath, confirmShell, maxIterations,
+             customPrompt, workspacePath, confirmShell, maxIterations, autoTitle,
              profiles, activeProfileID // legacy
     }
 
@@ -137,6 +172,7 @@ struct AppSettings: Codable {
         workspacePath = try c.decodeIfPresent(String.self, forKey: .workspacePath) ?? NSHomeDirectory() + "/OpenMinis"
         confirmShell = try c.decodeIfPresent(Bool.self, forKey: .confirmShell) ?? true
         maxIterations = try c.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 40
+        autoTitle = try c.decodeIfPresent(Bool.self, forKey: .autoTitle) ?? true
 
         if instances.isEmpty, let legacy = try? c.decodeIfPresent([LegacyProfile].self, forKey: .profiles), !legacy.isEmpty {
             let activeLegacy = try? c.decodeIfPresent(UUID.self, forKey: .activeProfileID)
@@ -155,6 +191,7 @@ struct AppSettings: Codable {
         try c.encode(workspacePath, forKey: .workspacePath)
         try c.encode(confirmShell, forKey: .confirmShell)
         try c.encode(maxIterations, forKey: .maxIterations)
+        try c.encode(autoTitle, forKey: .autoTitle)
     }
 
     /// Each old profile becomes an instance with the SAME id (so its Keychain key keeps working),

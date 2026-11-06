@@ -8,6 +8,9 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var pendingImages: [String] = []
     @State private var dropTargeted = false
+    @State private var findVisible = false
+    @State private var findQuery = ""
+    @State private var findIndex: Int? = nil
 
     private var conversation: Conversation? { store.conversation(conversationID) }
     private var running: Bool { store.isRunning(conversationID) }
@@ -30,7 +33,18 @@ struct ChatView: View {
             $0.role != .assistant || ($0.content.isEmpty && $0.toolCalls.isEmpty && $0.reasoning.isEmpty)
         } ?? true
 
+        let matches = findVisible ? ChatFind.matches(visible, query: findQuery) : []
+        let currentMatch = findIndex.flatMap { $0 < matches.count ? matches[$0] : nil }
+
         VStack(spacing: 0) {
+            if findVisible {
+                FindBar(query: $findQuery,
+                        label: ChatFind.label(current: findIndex, total: matches.count),
+                        onNext: { step(1, matches.count) },
+                        onPrev: { step(-1, matches.count) },
+                        onClose: { findVisible = false; findQuery = ""; findIndex = nil })
+                Divider()
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
@@ -42,6 +56,9 @@ struct ChatView: View {
                                        results: results,
                                        conversationID: conversationID,
                                        streaming: running && m.id == lastID)
+                                .padding(currentMatch?.messageID == m.id ? 6 : 0)
+                                .background(currentMatch?.messageID == m.id ? Color.yellow.opacity(0.18) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .id(m.id)
                         }
                         if running && (lastAssistantEmpty || store.approval(for: conversationID) == nil && messages.last?.role == .tool) {
@@ -62,6 +79,22 @@ struct ChatView: View {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
                 .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: currentMatch) { _, m in
+                    if let m { withAnimation { proxy.scrollTo(m.messageID, anchor: .center) } }
+                }
+                .onChange(of: findQuery) { _, _ in
+                    // Land on the newest match, like upstream.
+                    let n = ChatFind.matches(visible, query: findQuery).count
+                    findIndex = n > 0 ? n - 1 : nil
+                }
+                .onChange(of: store.findEvent) { _, ev in
+                    guard store.selectedID == conversationID else { return }
+                    switch ev.kind {
+                    case .open: findVisible = true
+                    case .next: step(1, matches.count)
+                    case .previous: step(-1, matches.count)
+                    }
+                }
             }
 
             if let a = store.approval(for: conversationID) {
@@ -89,6 +122,13 @@ struct ChatView: View {
             handleDrop(providers)
         }
         .navigationTitle(conversation?.title ?? "OpenMinis")
+    }
+
+    /// Wraps around; "next" moves toward newer messages.
+    private func step(_ d: Int, _ total: Int) {
+        guard total > 0 else { findIndex = nil; return }
+        let cur = findIndex ?? (d > 0 ? -1 : total)
+        findIndex = ((cur + d) % total + total) % total
     }
 
     private func send() {
@@ -223,6 +263,8 @@ struct UserBubble: View {
         .contextMenu {
             Button("复制") { copyToPasteboard(message.content) }
             Button("编辑") { startEdit() }.disabled(store.isRunning(conversationID))
+            Divider()
+            Button("从这里分叉") { store.fork(conversationID, at: message.id) }
         }
     }
 
@@ -288,6 +330,8 @@ struct AssistantRow: View {
             Button("复制") { copyToPasteboard(message.content) }
             Button("重新生成") { store.regenerate(message.id, in: conversationID) }
                 .disabled(store.isRunning(conversationID))
+            Divider()
+            Button("从这里分叉") { store.fork(conversationID, at: message.id) }
         }
     }
 }
@@ -670,5 +714,39 @@ struct ChatInputView: NSViewRepresentable {
             parent.onSubmit()
             return true
         }
+    }
+}
+
+
+// MARK: - In-chat find bar (ChatSearchBar.swift)
+
+struct FindBar: View {
+    @Binding var query: String
+    let label: String
+    let onNext: () -> Void
+    let onPrev: () -> Void
+    let onClose: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("在对话中查找", text: $query)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .onSubmit {
+                    if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { onPrev() } else { onNext() }
+                }
+                .onExitCommand(perform: onClose)
+            Text(label).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Button(action: onPrev) { Image(systemName: "chevron.up") }.help("上一个（⇧⌘G / ⇧Return）")
+            Button(action: onNext) { Image(systemName: "chevron.down") }.help("下一个（⌘G / Return）")
+            Button(action: onClose) { Image(systemName: "xmark.circle.fill") }.help("关闭（Esc）")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .onAppear { focused = true }
     }
 }

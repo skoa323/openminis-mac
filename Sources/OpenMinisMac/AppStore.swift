@@ -15,6 +15,15 @@ final class AppStore: ObservableObject {
     @Published var settings: AppSettings { didSet { saveSettings() } }
     @Published private(set) var runningIDs: Set<UUID> = []
     @Published private(set) var approvals: [PendingApproval] = []
+    @Published var folders: [ChatFolder] = AppStore.loadFolders()
+    @Published var titlingIDs: Set<UUID> = []
+    /// Bumped to ask the sidebar search field to take focus (⇧⌘F).
+    @Published var sidebarSearchFocus = 0
+    /// In-chat find commands from the menu (⌘F / ⌘G / ⇧⌘G); serial makes repeats observable.
+    enum FindKind { case open, next, previous }
+    struct FindEvent: Equatable { var kind: FindKind; var serial: Int }
+    @Published var findEvent = FindEvent(kind: .open, serial: 0)
+    func sendFind(_ k: FindKind) { findEvent = FindEvent(kind: k, serial: findEvent.serial + 1) }
 
     private var tasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
 
@@ -299,6 +308,7 @@ final class AppStore: ObservableObject {
         tasks[id] = nil
         runningIDs.remove(id)
         saveConversations()
+        autoTitleIfNeeded(id)
     }
 
     func stop(_ id: UUID) {
