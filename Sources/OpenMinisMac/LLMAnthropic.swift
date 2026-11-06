@@ -29,6 +29,12 @@ enum AnthropicWire {
         return max(1024, min(raw, maxTokens - 1))
     }
 
+    /// Beta flags matching upstream: effort for adaptive thinking, interleaved for budget thinking.
+    static func betaHeader(_ ctx: RequestContext) -> String? {
+        guard let level = ctx.thinking, level != .off else { return nil }
+        return isAdaptive(ctx.model) ? "effort-2025-11-24" : "interleaved-thinking-2025-05-14"
+    }
+
     static func messagesURL(_ ctx: RequestContext) -> URL? {
         var b = ctx.base
         while b.hasSuffix("/") { b.removeLast() }
@@ -90,8 +96,9 @@ enum AnthropicWire {
             "messages": msgs,
             "stream": true,
         ]
+        let adaptive = isAdaptive(ctx.model)
         if let level = ctx.thinking, level != .off {
-            if isAdaptive(ctx.model) {
+            if adaptive {
                 b["thinking"] = ["type": "adaptive", "display": "summarized"]
                 let effort: String
                 switch level {
@@ -103,11 +110,19 @@ enum AnthropicWire {
                 b["output_config"] = ["effort": effort]
             } else {
                 b["thinking"] = ["type": "enabled", "budget_tokens": budget(level, maxTokens: maxTokens)]
+                // Legacy budget thinking requires temperature 1.
+                b["temperature"] = 1
             }
         } else {
-            // Anthropic requires default temperature while thinking is on.
-            if let t = ctx.entry.overrides.temperature { b["temperature"] = t }
-            if let p = ctx.entry.overrides.topP { b["top_p"] = p }
+            // 4.6+/5 think by default: "off" must be sent explicitly or small calls burn the budget on thinking.
+            if adaptive && ctx.thinking == .off {
+                b["thinking"] = ["type": "disabled"]
+            }
+            // 4.6+/5 reject sampling params; older models accept them when thinking is off.
+            if !adaptive {
+                if let t = ctx.entry.overrides.temperature { b["temperature"] = t }
+                if let p = ctx.entry.overrides.topP { b["top_p"] = p }
+            }
         }
         if !tools.isEmpty {
             b["tools"] = tools.map { t -> [String: Any] in
@@ -130,6 +145,7 @@ struct AnthropicClient: LLMClient {
             var req = try LLMUtil.postJSON(url, AnthropicWire.body(system: system, messages: messages, tools: tools, ctx: ctx), ctx)
             req.setValue(ctx.apiKey, forHTTPHeaderField: "x-api-key")
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            if let beta = AnthropicWire.betaHeader(ctx) { req.setValue(beta, forHTTPHeaderField: "anthropic-beta") }
 
             let bytes = try await LLMUtil.openSSE(req)
             var blocks: [Int: Block] = [:]

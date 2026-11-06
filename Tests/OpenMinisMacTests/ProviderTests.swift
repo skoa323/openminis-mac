@@ -83,6 +83,22 @@ final class ProviderTests: XCTestCase {
         XCTAssertNil(plain["reasoning_effort"])
     }
 
+    func testAnthropicOffAndBeta() {
+        let msgs = [ChatMessage(role: .user, content: "hi")]
+        let off = AnthropicWire.body(system: "s", messages: msgs, tools: [],
+                                     ctx: ctx(.anthropic, model: "claude-opus-4-6", thinking: .off, reasoning: true))
+        XCTAssertEqual((off["thinking"] as? [String: Any])?["type"] as? String, "disabled")
+        XCTAssertNil(off["temperature"])
+        let legacy = AnthropicWire.body(system: "s", messages: msgs, tools: [],
+                                        ctx: ctx(.anthropic, model: "claude-sonnet-4-5", thinking: .low, reasoning: true))
+        XCTAssertEqual(legacy["temperature"] as? Int, 1)
+        XCTAssertEqual(AnthropicWire.betaHeader(ctx(.anthropic, model: "claude-opus-4-6", thinking: .high, reasoning: true)),
+                       "effort-2025-11-24")
+        XCTAssertEqual(AnthropicWire.betaHeader(ctx(.anthropic, model: "claude-sonnet-4-5", thinking: .high, reasoning: true)),
+                       "interleaved-thinking-2025-05-14")
+        XCTAssertNil(AnthropicWire.betaHeader(ctx(.anthropic, model: "claude-opus-4-6", thinking: .off, reasoning: true)))
+    }
+
     func testAnthropicAdaptiveVsBudget() {
         XCTAssertTrue(AnthropicWire.isAdaptive("claude-opus-4-6"))
         XCTAssertTrue(AnthropicWire.isAdaptive("claude-sonnet-5-5"))
