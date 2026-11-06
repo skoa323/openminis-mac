@@ -79,7 +79,6 @@ final class ToolRunner {
                      description: "Retrieve memories from persistent storage. Keyword search over memory entries (any keyword matching counts); results ranked by 50% keyword coverage + 50% recency. Empty keywords returns full files.",
                      parameters: obj(["keywords": str("Space-separated keywords; empty = return full memory files"),
                                       "scope": ["type": "string", "enum": ["daily", "all"], "description": "daily = daily logs only, all = daily logs + GLOBAL.md (default)"]], [])),
-        ])),
         ]
     }
 

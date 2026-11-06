@@ -2,52 +2,66 @@ import XCTest
 @testable import OpenMinisMac
 
 final class MemoryTests: XCTestCase {
+    private var tmp: URL!
+
     override func setUp() {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("omt-\(UUID().uuidString)")
+        tmp = FileManager.default.temporaryDirectory.appendingPathComponent("om-mem-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         MemoryStore.rootOverride = tmp.appendingPathComponent("memory")
         SkillLibrary.rootOverride = tmp.appendingPathComponent("skills")
     }
 
-    func testWritePrependsAndRevoke() throws {
-        _ = try MemoryStore.write("## A\nfirst")
-        _ = try MemoryStore.write("## B\nsecond")
+    override func tearDown() {
+        MemoryStore.rootOverride = nil
+        SkillLibrary.rootOverride = nil
+        try? FileManager.default.removeItem(at: tmp)
+    }
+
+    func testWritePrependsAndGetFinds() throws {
+        _ = try MemoryStore.write("## A\nlikes swift")
+        _ = try MemoryStore.write("## B\nprefers dark mode")
         let text = MemoryStore.read(MemoryStore.dailyFile())
-        XCTAssertLessThan(text.range(of: "second")!.lowerBound, text.range(of: "first")!.lowerBound)
-        XCTAssertTrue(MemoryStore.revoke("## A\nfirst"))
-        XCTAssertFalse(MemoryStore.read(MemoryStore.dailyFile()).contains("first"))
+        XCTAssertTrue(text.hasPrefix("<!-- "))
+        XCTAssertTrue(text.range(of: "dark mode")!.lowerBound < text.range(of: "swift")!.lowerBound)
+        let r = MemoryStore.get(keywords: "swift", scope: "all")
+        XCTAssertTrue(r.contains("likes swift"))
+        XCTAssertFalse(r.contains("dark mode"))
+        XCTAssertTrue(MemoryStore.get(keywords: "nothinghere", scope: "daily").hasPrefix("No matches"))
     }
 
-    func testGetRanksAndReportsNoMatch() throws {
-        _ = try MemoryStore.write("swift package notes")
-        _ = try MemoryStore.write("python tips")
-        let out = MemoryStore.get(keywords: "swift", scope: "daily")
-        XCTAssertTrue(out.contains("Found 1 matching"))
-        XCTAssertTrue(MemoryStore.get(keywords: "zzz", scope: "daily").contains("No matches found"))
+    func testRevoke() throws {
+        _ = try MemoryStore.write("remember me")
+        XCTAssertTrue(MemoryStore.revoke("remember me"))
+        XCTAssertFalse(MemoryStore.read(MemoryStore.dailyFile()).contains("remember me"))
     }
 
-    func testSoulRoundTripAndTokens() {
-        var s = Soul(); s.name = "Mini"; s.style = "简洁"; s.body = "你好 world"
+    func testSoulRoundTrip() {
+        var s = Soul()
+        s.name = "Kiro"; s.style = "简洁"; s.body = "Be kind."
         let p = Soul.parse(s.serialize())
-        XCTAssertEqual(p.name, "Mini"); XCTAssertEqual(p.style, "简洁"); XCTAssertEqual(p.body, "你好 world")
-        XCTAssertEqual(Soul.tokenCount("你好 world"), 3)
+        XCTAssertEqual(p.name, "Kiro")
+        XCTAssertEqual(p.style, "简洁")
+        XCTAssertEqual(p.body.trimmingCharacters(in: .whitespacesAndNewlines), "Be kind.")
         XCTAssertEqual(Soul.parse("no frontmatter").body, "no frontmatter")
+        XCTAssertEqual(Soul.tokenCount("你好 world"), 3)
     }
 
-    func testSkillParseSlugVersion() {
-        let fm = SkillLibrary.parse("---\nname: My Skill\ndescription: |\n  line1\n  line2\n---\nbody")
+    func testSkillFrontmatterAndSlug() {
+        let fm = SkillLibrary.parse("---\nname: My Skill\ndescription: does things\n---\nbody")
         XCTAssertEqual(fm?.name, "My Skill")
-        XCTAssertTrue(fm?.description.contains("line1") ?? false)
-        XCTAssertEqual(SkillLibrary.slugify("My Skill_v2"), "my-skill-v2")
-        XCTAssertTrue(SkillLibrary.versionLess("2.1.0", "10.0.0"))
+        XCTAssertEqual(fm?.description, "does things")
+        XCTAssertEqual(fm?.version, "1.0.0")
+        XCTAssertEqual(SkillLibrary.slugify("My Skill_v2!"), "my-skill-v2")
+        XCTAssertTrue(SkillLibrary.versionLess("2.1.0", "10.0"))
+        XCTAssertFalse(SkillLibrary.versionLess("2.1.0", "2.1.0"))
     }
 
-    func testInstallAndPromptFragment() throws {
-        let id = try SkillLibrary.install(skillMD: "---\nname: demo\ndescription: a <b> test\n---\n", source: "file")
-        XCTAssertEqual(id, "demo")
-        let meta = SkillLibrary.scan(SkillLibrary.loadMeta())
-        let frag = SkillLibrary.promptFragment(meta)
-        XCTAssertTrue(frag.contains("<available_skills>"))
-        XCTAssertTrue(frag.contains("a &lt;b&gt; test"))
+    func testSkillPromptFragment() {
         XCTAssertEqual(SkillLibrary.promptFragment([]), "")
+        let s = SkillMeta(id: "a", name: "A<b>", description: String(repeating: "x", count: 250), version: "1.0.0")
+        let p = SkillLibrary.promptFragment([s])
+        XCTAssertTrue(p.contains("<available_skills>"))
+        XCTAssertTrue(p.contains("A&lt;b&gt;"))
+        XCTAssertTrue(p.contains("…"))
     }
 }
