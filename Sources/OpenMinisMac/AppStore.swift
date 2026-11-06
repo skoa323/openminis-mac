@@ -29,15 +29,15 @@ final class AppStore: ObservableObject {
 
     // MARK: - Paths & persistence
 
-    static var supportDir: URL {
+    nonisolated static var supportDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("OpenMinisMac", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
-    static var conversationsFile: URL { supportDir.appendingPathComponent("conversations.json") }
-    static var settingsFile: URL { supportDir.appendingPathComponent("settings.json") }
-    static var memoryFile: URL { supportDir.appendingPathComponent("MEMORY.md") }
+    nonisolated static var conversationsFile: URL { supportDir.appendingPathComponent("conversations.json") }
+    nonisolated static var settingsFile: URL { supportDir.appendingPathComponent("settings.json") }
+    nonisolated static var memoryFile: URL { supportDir.appendingPathComponent("MEMORY.md") }
 
     var workspaceURL: URL {
         URL(fileURLWithPath: (settings.workspacePath as NSString).expandingTildeInPath, isDirectory: true)
