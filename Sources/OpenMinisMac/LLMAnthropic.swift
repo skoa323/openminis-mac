@@ -37,7 +37,7 @@ enum AnthropicWire {
 
     static func body(system: String, messages: [ChatMessage], tools: [ToolSpec], ctx: RequestContext) -> [String: Any] {
         let thinkingOn = (ctx.thinking ?? .off) != .off
-        let maxTokens = ctx.entry.maxOutputTokens ?? (thinkingOn ? 32000 : 8192)
+        let maxTokens = ctx.entry.maxOutputTokens ?? (thinkingOn ? 64000 : 8192)
         var msgs: [[String: Any]] = []
 
         func append(role: String, blocks: [[String: Any]]) {
