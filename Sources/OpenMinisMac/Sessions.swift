@@ -426,8 +426,10 @@ enum TitleGen {
     static func clean(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         s = s.components(separatedBy: .newlines).first ?? s
-        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’「」《》#*。.：: "))
-        if s.hasPrefix("标题") { s = String(s.dropFirst(2)).trimmingCharacters(in: CharacterSet(charactersIn: "：: ")) }
+        let junk = CharacterSet(charactersIn: "\"'“”‘’「」《》#*。.：: ")
+        s = s.trimmingCharacters(in: junk)
+        // Strip a "标题：" prefix, then trim again so quotes after it go too.
+        if s.hasPrefix("标题") { s = String(s.dropFirst(2)).trimmingCharacters(in: junk) }
         return String(s.prefix(30))
     }
 }
