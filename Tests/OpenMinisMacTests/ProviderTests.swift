@@ -174,4 +174,12 @@ final class ProviderTests: XCTestCase {
         let oai = ModelCatalog.parse(["data": [["id": "gpt-4o"], ["id": ""]]], type: .openAI)
         XCTAssertEqual(oai.map(\.id), ["gpt-4o"])
     }
+
+    func testRetryLadder() {
+        let http503 = LLMError.http(503, body: "")
+        let net = LLMError(kind: .network, message: "x")
+        XCTAssertEqual(ModelRouter.retryDelays(for: http503, hasFallbackTarget: true), [2, 5])
+        XCTAssertEqual(ModelRouter.retryDelays(for: http503, hasFallbackTarget: false), [3, 5, 10, 15, 30])
+        XCTAssertEqual(ModelRouter.retryDelays(for: net, hasFallbackTarget: true), [3, 5, 10, 15, 30])
+    }
 }

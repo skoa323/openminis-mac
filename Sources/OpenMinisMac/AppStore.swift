@@ -432,7 +432,7 @@ final class AppStore: ObservableObject {
             let assistant = ChatMessage(role: .assistant, content: "")
             append(assistant, to: id)
             var calls: [ToolCall] = []
-            var retried = false
+            var retryAttempt = 0
 
             attempt: while true {
                 guard ci < cands.count, let e = entry(cands[ci]), let inst = instance(e.instanceID) else {
@@ -474,15 +474,25 @@ final class AppStore: ObservableObject {
                     if Task.isCancelled || error is CancellationError { return }
                     if (error as? URLError)?.code == .cancelled { return }
                     let le = LLMError.wrap(error)
-                    // limited: transient/network errors get one retry on the same model first.
-                    if g.fallbackPolicy == .limited && le.isTransient && !retried {
-                        retried = true
-                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                        continue attempt
+                    // limited: transient/network errors walk the upstream retry ladder on the same model first
+                    // (AIChatViewModel+Fallback.swift); `always` falls back immediately.
+                    let hasNext = ci + 1 < cands.count
+                    if g.fallbackPolicy == .limited && le.isTransient {
+                        let delays = ModelRouter.retryDelays(for: le, hasFallbackTarget: hasNext)
+                        if retryAttempt < delays.count {
+                            let wait = delays[retryAttempt]
+                            retryAttempt += 1
+                            mutate(id, assistant.id) {
+                                $0.modelLabel = "\(label) · 第 \(retryAttempt)/\(delays.count) 次重试（\(wait) 秒后）"
+                            }
+                            try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
+                            if Task.isCancelled { return }
+                            continue attempt
+                        }
                     }
-                    if ci + 1 < cands.count {
+                    if hasNext {
                         ci += 1
-                        retried = false
+                        retryAttempt = 0
                         continue attempt
                     }
                     mutate(id, assistant.id) { $0.toolCalls = [] }

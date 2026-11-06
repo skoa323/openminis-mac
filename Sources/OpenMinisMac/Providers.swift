@@ -337,6 +337,16 @@ enum ModelRouter {
         return Array(avail[start...] + avail[..<start])
     }
 
+    /// Upstream retry ladder (seconds) for transient errors on the same model.
+    static let retryLadder = [3, 5, 10, 15, 30]
+    /// Short ladder for a server-answered 5xx when another group member can take over.
+    static let serverCapacityLadder = [2, 5]
+
+    /// Network errors (no status code) keep the full ladder: switching models doesn't fix them.
+    static func retryDelays(for error: LLMError, hasFallbackTarget: Bool) -> [Int] {
+        (hasFallbackTarget && error.kind == .transient) ? serverCapacityLadder : retryLadder
+    }
+
     /// Whether an error should move on to the next member (true) or be retried on the same one (false).
     static func shouldFallback(_ error: LLMError, policy: FallbackPolicy) -> Bool {
         switch policy {
