@@ -322,7 +322,7 @@ private extension FileHandle {
         var result = Data()
         var buf = [UInt8](repeating: 0, count: 65536)
         while true {
-            let n = read(fd, &buf, buf.count)
+            let n = Darwin.read(fd, &buf, buf.count)
             if n <= 0 { break }
             result.append(buf, count: n)
         }
