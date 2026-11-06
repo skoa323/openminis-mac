@@ -76,8 +76,118 @@ final class AppStore: ObservableObject {
 
     // MARK: - Conversations
 
-    var activeProfile: ProviderProfile? {
-        settings.profiles.first { $0.id == settings.activeProfileID } ?? settings.profiles.first
+    // MARK: - Providers / groups
+
+    func instance(_ id: UUID) -> ProviderInstance? { settings.instances.first { $0.id == id } }
+    func entry(_ id: String) -> ModelEntry? { settings.entries.first { $0.id == id } }
+
+    /// Member usable right now: entry visible, instance enabled and has a credential.
+    func isAvailable(_ entryID: String) -> Bool {
+        guard let e = entry(entryID), !e.isHidden, let inst = instance(e.instanceID) else { return false }
+        return inst.isEnabled && inst.hasCredential
+    }
+
+    func group(for conversationID: UUID?) -> ModelGroup? {
+        let cg = conversationID.flatMap { conversation($0)?.groupID }
+        for gid in [cg, settings.activeGroupID].compactMap({ $0 }) {
+            if let g = settings.groups.first(where: { $0.id == gid }) { return g }
+        }
+        return settings.groups.first
+    }
+
+    func thinking(for conversationID: UUID?) -> ThinkingLevel {
+        if let id = conversationID, let t = conversation(id)?.thinkingLevel { return t }
+        return group(for: conversationID)?.defaultThinkingLevel ?? settings.defaultThinkingLevel
+    }
+
+    func setGroup(_ gid: UUID?, for conversationID: UUID) {
+        guard let i = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[i].groupID = gid
+        if let gid { settings.activeGroupID = gid }
+    }
+
+    func setThinking(_ t: ThinkingLevel, for conversationID: UUID) {
+        guard let i = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[i].thinkingLevel = t
+        settings.defaultThinkingLevel = t
+    }
+
+    func entryLabel(_ e: ModelEntry) -> String {
+        "\(instance(e.instanceID)?.label ?? "?") · \(e.displayName)"
+    }
+
+    // MARK: - Usage log
+
+    struct UsageRecord: Codable, Hashable {
+        var date: Date
+        var entryID: String
+        var label: String
+        var usage: TokenUsage
+    }
+    @Published private(set) var usageLog: [UsageRecord] = AppStore.loadUsage()
+    nonisolated static var usageFile: URL { supportDir.appendingPathComponent("usage.json") }
+
+    private static func loadUsage() -> [UsageRecord] {
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        guard let d = try? Data(contentsOf: usageFile),
+              let u = try? dec.decode([UsageRecord].self, from: d) else { return [] }
+        return u
+    }
+    private func saveUsage() {
+        let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+        if let d = try? enc.encode(usageLog) { try? d.write(to: AppStore.usageFile, options: .atomic) }
+    }
+    private func recordUsage(_ u: TokenUsage, entry e: ModelEntry) {
+        usageLog.append(UsageRecord(date: Date(), entryID: e.id, label: entryLabel(e), usage: u))
+        if usageLog.count > 20000 { usageLog.removeFirst(usageLog.count - 20000) }
+        saveUsage()
+    }
+    func clearUsage() { usageLog = []; saveUsage() }
+
+    // MARK: - Model lists
+
+    @Published var fetchingInstances: Set<UUID> = []
+    @Published var fetchErrors: [UUID: String] = [:]
+
+    /// Pulls /models for an instance, enriches from models.dev, merges into entries.
+    func refreshModels(_ instanceID: UUID) async {
+        guard let inst = instance(instanceID) else { return }
+        fetchingInstances.insert(instanceID)
+        fetchErrors[instanceID] = nil
+        defer { fetchingInstances.remove(instanceID) }
+        do {
+            let remote = try await ModelCatalog.fetch(inst)
+            let db = await ModelCatalog.modelsDev()
+            let base = inst.effectiveBaseURL
+            var entries = settings.entries
+            for rm in remote {
+                let mid = rm.id
+                let info = db.map { ModelCatalog.merge(rm.info, ModelCatalog.lookup($0, modelID: mid, baseURL: base)) } ?? rm.info
+                if let i = entries.firstIndex(where: { $0.instanceID == instanceID && $0.modelID == mid }) {
+                    entries[i].info = info
+                } else {
+                    var e = ModelEntry(instanceID: instanceID, modelID: mid, info: info)
+                    e.isHidden = true   // newly discovered models start hidden; user picks which to show
+                    entries.append(e)
+                }
+            }
+            settings.entries = entries
+        } catch {
+            fetchErrors[instanceID] = error.localizedDescription
+        }
+    }
+
+    func removeInstance(_ id: UUID) {
+        let removed = Set(settings.entries.filter { $0.instanceID == id }.map(\.id))
+        settings.entries.removeAll { $0.instanceID == id }
+        for i in settings.groups.indices { settings.groups[i].members.removeAll { removed.contains($0) } }
+        settings.instances.removeAll { $0.id == id }
+        Keychain.delete(id.uuidString)
+    }
+
+    func removeEntry(_ entryID: String) {
+        settings.entries.removeAll { $0.id == entryID }
+        for i in settings.groups.indices { settings.groups[i].members.removeAll { $0 == entryID } }
     }
 
     func conversation(_ id: UUID) -> Conversation? {
@@ -255,10 +365,18 @@ final class AppStore: ObservableObject {
 
     /// History as sent to the model: drops local error notices and empty assistant turns,
     /// and patches any tool call that never got a result (e.g. after a stop).
-    private func apiHistory(_ id: UUID) -> [ChatMessage] {
+    private func apiHistory(_ id: UUID, limit: Int? = nil) -> [ChatMessage] {
         guard let c = conversation(id) else { return [] }
         var out: [ChatMessage] = []
-        let msgs = c.messages
+        var msgs = c.messages
+        // Context limit: drop the oldest turns, always restarting at a user message.
+        if let limit, limit > 0 {
+            var total = msgs.reduce(0) { $0 + AppStore.estimateTokens($1) }
+            while total > limit, let next = msgs.dropFirst().firstIndex(where: { $0.role == .user }) {
+                total -= msgs[..<next].reduce(0) { $0 + AppStore.estimateTokens($1) }
+                msgs.removeSubrange(..<next)
+            }
+        }
         var i = 0
         while i < msgs.count {
             let m = msgs[i]
@@ -283,53 +401,94 @@ final class AppStore: ObservableObject {
         return out
     }
 
-    private func runAgent(_ id: UUID) async {
-        guard let profile = activeProfile else {
-            append(ChatMessage(role: .assistant, content: "还没有配置模型。请打开设置（⌘,）添加一个模型服务。", isError: true), to: id)
-            return
-        }
-        let apiKey = Keychain.get(profile.id.uuidString) ?? ""
-        if apiKey.isEmpty && profile.kind == .anthropic {
-            append(ChatMessage(role: .assistant, content: "「\(profile.name)」还没有填写 API Key。请打开设置（⌘,）填写。", isError: true), to: id)
-            return
-        }
-        if apiKey.isEmpty && !profile.baseURL.contains("localhost") && !profile.baseURL.contains("127.0.0.1") {
-            append(ChatMessage(role: .assistant, content: "「\(profile.name)」还没有填写 API Key。请打开设置（⌘,）填写。", isError: true), to: id)
-            return
-        }
+    /// Rough token estimate (chars / 3, images ~1k) used for the group's context limit.
+    private static func estimateTokens(_ m: ChatMessage) -> Int {
+        let chars = m.content.count + m.reasoning.count + m.toolCalls.reduce(0) { $0 + $1.arguments.count }
+        return chars / 3 + m.images.count * 1000 + 4
+    }
 
-        let client = makeClient(profile: profile, apiKey: apiKey)
+    private func runAgent(_ id: UUID) async {
+        guard let g = group(for: id) else {
+            append(ChatMessage(role: .assistant, content: "还没有模型分组。请打开设置（⌘,）→ 模型分组，新建一个分组并加入模型。", isError: true), to: id)
+            return
+        }
+        let cands = ModelRouter.candidates(group: g, sessionKey: id.uuidString, isAvailable: { [unowned self] in self.isAvailable($0) })
+        if cands.isEmpty {
+            append(ChatMessage(role: .assistant, content: "分组「\(g.name)」里没有可用模型。请打开设置（⌘,），给服务商填写 API Key，并把模型加入该分组。", isError: true), to: id)
+            return
+        }
+        let requested = thinking(for: id)
+
         try? FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
         let runner = ToolRunner(workspace: workspaceURL, memoryFile: AppStore.memoryFile) { [weak self] cmd in
             guard let self else { return false }
             return await self.requestApproval(cmd, conversation: id)
         }
         let specs = ToolRunner.specs
+        var ci = 0   // current candidate; sticks across tool iterations once a fallback happened
 
         for _ in 0..<max(1, settings.maxIterations) {
             if Task.isCancelled { return }
             let assistant = ChatMessage(role: .assistant, content: "")
             append(assistant, to: id)
             var calls: [ToolCall] = []
+            var retried = false
 
-            do {
-                let stream = client.stream(system: systemPrompt(), messages: apiHistory(id), tools: specs)
-                for try await ev in stream {
-                    switch ev {
-                    case .text(let t):
-                        mutate(id, assistant.id) { $0.content += t }
-                    case .reasoning(let r):
-                        mutate(id, assistant.id) { $0.reasoning += r }
-                    case .toolCall(let tc):
-                        calls.append(tc)
-                        mutate(id, assistant.id) { $0.toolCalls.append(tc) }
-                    }
+            attempt: while true {
+                guard ci < cands.count, let e = entry(cands[ci]), let inst = instance(e.instanceID) else {
+                    append(ChatMessage(role: .assistant, content: "分组「\(g.name)」里的模型都不可用。", isError: true), to: id)
+                    return
                 }
-            } catch {
-                if Task.isCancelled || error is CancellationError { return }
-                if (error as? URLError)?.code == .cancelled { return }
-                append(ChatMessage(role: .assistant, content: "请求出错：\(error.localizedDescription)", isError: true), to: id)
-                return
+                let label = entryLabel(e)
+                mutate(id, assistant.id) {
+                    $0.content = ""; $0.reasoning = ""; $0.reasoningSignature = nil
+                    $0.toolCalls = []; $0.usage = nil; $0.modelLabel = label
+                }
+                calls = []
+                var lastUsage: TokenUsage? = nil
+                let ctx = RequestContext(instance: inst, entry: e, apiKey: inst.apiKey,
+                                         thinking: e.effectiveThinking(requested))
+                do {
+                    let stream = makeClient(ctx).stream(system: systemPrompt(),
+                                                        messages: apiHistory(id, limit: g.contextLimitTokens),
+                                                        tools: specs)
+                    for try await ev in stream {
+                        switch ev {
+                        case .text(let t):
+                            mutate(id, assistant.id) { $0.content += t }
+                        case .reasoning(let r):
+                            mutate(id, assistant.id) { $0.reasoning += r }
+                        case .reasoningSignature(let s):
+                            mutate(id, assistant.id) { $0.reasoningSignature = s }
+                        case .toolCall(let tc):
+                            calls.append(tc)
+                            mutate(id, assistant.id) { $0.toolCalls.append(tc) }
+                        case .usage(let u):
+                            lastUsage = u
+                            mutate(id, assistant.id) { $0.usage = u }
+                        }
+                    }
+                    if let u = lastUsage { recordUsage(u, entry: e) }
+                    break attempt
+                } catch {
+                    if Task.isCancelled || error is CancellationError { return }
+                    if (error as? URLError)?.code == .cancelled { return }
+                    let le = LLMError.wrap(error)
+                    // limited: transient/network errors get one retry on the same model first.
+                    if g.fallbackPolicy == .limited && le.isTransient && !retried {
+                        retried = true
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        continue attempt
+                    }
+                    if ci + 1 < cands.count {
+                        ci += 1
+                        retried = false
+                        continue attempt
+                    }
+                    mutate(id, assistant.id) { $0.toolCalls = [] }
+                    append(ChatMessage(role: .assistant, content: "请求出错（\(label)）：\(le.message)", isError: true), to: id)
+                    return
+                }
             }
 
             if calls.isEmpty { return }

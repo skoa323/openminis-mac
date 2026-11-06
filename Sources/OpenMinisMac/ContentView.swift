@@ -19,27 +19,52 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                ProfilePicker()
+                ModelControls()
             }
         }
     }
 }
 
-struct ProfilePicker: View {
+struct ModelControls: View {
     @EnvironmentObject var store: AppStore
 
     var body: some View {
-        Picker("模型", selection: Binding<UUID?>(
-            get: { store.activeProfile?.id },
-            set: { store.settings.activeProfileID = $0 }
-        )) {
-            ForEach(store.settings.profiles) { p in
-                Text("\(p.name) · \(p.model)").tag(Optional(p.id))
+        let cid = store.selectedID
+        HStack(spacing: 8) {
+            Picker("模型分组", selection: Binding<UUID?>(
+                get: { store.group(for: cid)?.id },
+                set: { gid in
+                    if let cid { store.setGroup(gid, for: cid) } else { store.settings.activeGroupID = gid }
+                }
+            )) {
+                ForEach(store.settings.groups) { g in
+                    Text(groupTitle(g)).tag(Optional(g.id))
+                }
             }
+            .pickerStyle(.menu)
+            .frame(minWidth: 160)
+            .help("当前对话使用的模型分组")
+
+            Picker("思考", selection: Binding<ThinkingLevel>(
+                get: { store.thinking(for: cid) },
+                set: { t in
+                    if let cid { store.setThinking(t, for: cid) } else { store.settings.defaultThinkingLevel = t }
+                }
+            )) {
+                ForEach(ThinkingLevel.allCases) { t in
+                    Text("思考：\(t.label)").tag(t)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 110)
+            .help("思考档位（会按模型能力自动收敛）")
         }
-        .pickerStyle(.menu)
-        .frame(minWidth: 180)
-        .help("当前使用的模型")
+    }
+
+    private func groupTitle(_ g: ModelGroup) -> String {
+        let first = g.members.first(where: { store.isAvailable($0) }).flatMap { store.entry($0) }
+        if let e = first { return "\(g.name) · \(e.displayName)" }
+        return "\(g.name)（无可用模型）"
     }
 }
 

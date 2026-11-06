@@ -258,6 +258,16 @@ struct AssistantRow: View {
             ForEach(message.toolCalls) { tc in
                 ToolCallView(call: tc, result: results[tc.id])
             }
+            if !streaming, message.modelLabel != nil || message.usage != nil {
+                HStack(spacing: 8) {
+                    if let l = message.modelLabel { Text(l) }
+                    if let u = message.usage {
+                        Text("输入 \(u.input) · 输出 \(u.output)" + (u.cacheRead > 0 ? " · 缓存 \(u.cacheRead)" : ""))
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
             if !streaming && (!message.content.isEmpty || message.isError) {
                 HStack(spacing: 12) {
                     Button { copyToPasteboard(message.content) } label: { Image(systemName: "doc.on.doc") }
