@@ -68,7 +68,7 @@ extension AppStore {
                                     Task { @MainActor in self?.skillTouched(sid, wrote: wrote) }
                                 }) { [weak self] cmd in
             guard let self else { return false }
-            return await self.requestApproval(cmd, conversation: parentID)
+            return await self.requestApproval(cmd, conversation: id)
         }
         let specs = ToolRunner.specs(memory: false, allowSubAgents: false)
         var ci = 0

@@ -936,7 +936,18 @@ final class AgentJobRegistry: ObservableObject {
             }
             target = .childOfCurrent(parentConversationID: pid, parentToolUseID: nil)
             destination = .childOfCurrent(parentSessionId: pid.uuidString, isCallerSession: pid == callerID)
-        default:
+        case "rerun":
+            guard let sid = targetSessionID, let conv = store?.conversation(sid) else {
+                return ToolResult(output: "Error: target=rerun requires an active conversation.", isError: true)
+            }
+            let midRaw = (args["message_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let mid = midRaw.flatMap(UUID.init(uuidString:)) ?? conv.messages.last(where: { $0.role == .user })?.id
+            guard let targetMID = mid else {
+                return ToolResult(output: "Error: target=rerun could not find a user message to re-run.", isError: true)
+            }
+            target = .rerun(conversationID: sid, messageID: targetMID)
+            destination = .rerun(sessionId: sid.uuidString, messageId: targetMID.uuidString, title: conv.title)
+        case "follow-up", "follow_up", "followup":
             guard let sid = targetSessionID else {
                 target = .new
                 destination = .newChat(label: label)
@@ -945,6 +956,8 @@ final class AgentJobRegistry: ObservableObject {
             target = .followUp(conversationID: sid)
             let sTitle = store?.conversation(sid)?.title
             destination = .followUp(sessionId: sid.uuidString, title: sTitle, isCallerSession: sid == callerID)
+        default:
+            return ToolResult(output: "Error: unknown target '\(targetKind)'. Valid targets: follow-up, new, child-of-current, rerun.", isError: true)
         }
 
         let job = AgentJob(
@@ -1121,12 +1134,16 @@ final class AgentJobRegistry: ObservableObject {
         case .onCompletion(let ofJobId):
             job.nextFireAt = nil
             job.task = Task { [weak self, weak job] in
-                let seq = NotificationCenter.default.notifications(named: .agentJobDidFinish)
-                for await note in seq {
-                    if Task.isCancelled { return }
-                    if let doneId = note.object as? String,
-                       doneId == ofJobId || doneId.hasPrefix(ofJobId) {
-                        break
+                if let existing = self?.job(matchingPrefix: ofJobId), existing.state.isTerminal {
+                    // Already finished before arming
+                } else {
+                    let seq = NotificationCenter.default.notifications(named: .agentJobDidFinish)
+                    for await note in seq {
+                        if Task.isCancelled { return }
+                        if let doneId = note.object as? String,
+                           doneId == ofJobId || doneId.hasPrefix(ofJobId) {
+                            break
+                        }
                     }
                 }
                 guard !Task.isCancelled, let self, let job, job.isEnabled, job.state == .pending else { return }
@@ -1215,7 +1232,7 @@ final class AgentJobRegistry: ObservableObject {
             c.title = job.label.map { "Scheduled · \($0)" } ?? "Scheduled · \(job.title)"
             c.thinkingLevel = job.thinkingLevel
             store.conversations.insert(c, at: 0)
-            store.selectedID = c.id
+            if store.selectedID == nil { store.selectedID = c.id }
             store.saveConversations()
             store.deliverProgrammaticTurn(envelope, to: c.id, preset: job.presetToolCall, presetTitle: job.title)
             BackgroundKeepAliveManager.shared.notifyCompletionIfNeeded(title: "定时任务已触发：\(job.title)", body: prompt)
@@ -1255,6 +1272,7 @@ final class AgentJobRegistry: ObservableObject {
         job.nextFireAt = nil
         job.endedAt = Date()
         saveToDisk()
+        NotificationCenter.default.post(name: .agentJobDidFinish, object: job.id)
     }
 
     private func finishScheduledJobIfExhausted(_ job: AgentJob) {

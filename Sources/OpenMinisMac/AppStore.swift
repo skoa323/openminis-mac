@@ -332,10 +332,15 @@ final class AppStore: ObservableObject {
         tasks[id]?.task.cancel()
         tasks[id] = nil
         runningIDs.remove(id)
-        queuedTurns[id] = nil
+        if let q = queuedTurns[id] {
+            let kept = q.filter { AgentCallback.isCallbackText($0.text) }
+            queuedTurns[id] = kept.isEmpty ? nil : kept
+        }
         pendingPresets[id] = nil
-        let mine = approvals.filter { $0.conversationID == id }
-        approvals.removeAll { $0.conversationID == id }
+        let childIDs = Set(conversations.filter { $0.parentConversationID == id }.map(\.id))
+        let targetIDs = childIDs.union([id])
+        let mine = approvals.filter { targetIDs.contains($0.conversationID) }
+        approvals.removeAll { targetIDs.contains($0.conversationID) }
         for a in mine { a.continuation.resume(returning: false) }
         saveConversations()
         AgentJobRegistry.shared.syncKeepAliveCounts()
@@ -358,8 +363,9 @@ final class AppStore: ObservableObject {
         a.continuation.resume(returning: allow)
     }
 
-    func approval(for conversation: UUID) -> PendingApproval? {
-        approvals.first { $0.conversationID == conversation }
+    func approval(for conversationID: UUID) -> PendingApproval? {
+        let childIDs = Set(conversations.filter { $0.parentConversationID == conversationID }.map(\.id))
+        return approvals.first { $0.conversationID == conversationID || childIDs.contains($0.conversationID) }
     }
 
     // MARK: - Agent loop
