@@ -13,7 +13,7 @@ final class AppStore: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var selectedID: UUID?
     @Published var settings: AppSettings { didSet { saveSettings() } }
-    @Published private(set) var runningIDs: Set<UUID> = []
+    @Published var runningIDs: Set<UUID> = []
     @Published private(set) var approvals: [PendingApproval] = []
     @Published var folders: [ChatFolder] = AppStore.loadFolders()
     @Published var titlingIDs: Set<UUID> = []

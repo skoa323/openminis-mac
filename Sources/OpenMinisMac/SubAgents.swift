@@ -445,28 +445,35 @@ struct ScheduledPresetToolCall: Codable, Equatable, Sendable {
         "toolu_sched_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(24)
     }
 
-    static func parse(command: String?, timeoutSeconds: Double?, toolArgsJSON: String? = nil) -> Result<ScheduledPresetToolCall?, String> {
+    enum PresetError: Error, Equatable, CustomStringConvertible {
+        case invalid(String)
+        var description: String {
+            switch self { case .invalid(let m): return m }
+        }
+    }
+
+    static func parse(command: String?, timeoutSeconds: Double?, toolArgsJSON: String? = nil) -> Result<ScheduledPresetToolCall?, PresetError> {
         var cmd = command
         var timeout: Int? = nil
         if let t = timeoutSeconds {
             guard t.isFinite, t >= 1, t <= 3600 else {
-                return .failure("--command-timeout must be between 1s and 1h")
+                return .failure(.invalid("--command-timeout must be between 1s and 1h"))
             }
             timeout = Int(t.rounded())
         }
         if let toolArgsJSON, !toolArgsJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard cmd == nil else {
-                return .failure("use either command or tool_args, not both")
+                return .failure(.invalid("use either command or tool_args, not both"))
             }
             guard let data = toolArgsJSON.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let c = obj["command"] as? String else {
-                return .failure("tool_args must be a JSON object with a \"command\" string")
+                return .failure(.invalid("tool_args must be a JSON object with a \"command\" string"))
             }
             cmd = c
             if timeout == nil, let tn = obj["timeout"] as? NSNumber {
                 let v = tn.intValue
-                guard timeoutRange.contains(v) else { return .failure("timeout must be between 1s and 3600s") }
+                guard timeoutRange.contains(v) else { return .failure(.invalid("timeout must be between 1s and 3600s")) }
                 timeout = v
             }
         }
@@ -474,7 +481,7 @@ struct ScheduledPresetToolCall: Codable, Equatable, Sendable {
             return .success(nil)
         }
         guard finalCmd.count <= maxCommandLength else {
-            return .failure("command is longer than \(maxCommandLength) characters")
+            return .failure(.invalid("command is longer than \(maxCommandLength) characters"))
         }
         return .success(ScheduledPresetToolCall(command: finalCmd, timeoutSeconds: timeout))
     }
