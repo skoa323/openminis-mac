@@ -462,6 +462,7 @@ struct ToolCallView: View {
         case "write_file", "edit_file": return "square.and.pencil"
         case "list_dir": return "folder"
         case "web_fetch": return "globe"
+        case "browser_use": return "safari"
         case "memory_write", "memory_get": return "brain"
         default: return "wrench"
         }
@@ -475,7 +476,7 @@ struct ToolCallView: View {
 
     private var summary: String {
         let a = args
-        for key in ["command", "path", "url", "query", "content"] {
+        for key in ["action", "command", "path", "url", "query", "content"] {
             if let s = a[key] as? String, !s.isEmpty {
                 return s.replacingOccurrences(of: "\n", with: " ")
             }

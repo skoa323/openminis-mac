@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -20,6 +21,15 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 ModelControls()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    openWindow(id: "browser")
+                } label: {
+                    Label("浏览器", systemImage: "safari")
+                }
+                .help("打开内置浏览器窗口（⇧⌘B）")
+                .keyboardShortcut("b", modifiers: [.command, .shift])
             }
             ToolbarItem(placement: .primaryAction) {
                 if let cid = store.selectedID { SessionExtrasButton(conversationID: cid) }

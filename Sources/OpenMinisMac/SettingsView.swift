@@ -13,15 +13,11 @@ struct SettingsView: View {
             SoulSettings()
                 .tabItem { Label("人格", systemImage: "person.crop.circle") }
             SkillsSettings()
-                .tabItem { Label("技能", systemImage: "puzzlepiece") }
+                .tabItem { Label("技能", systemImage: "puzzlepiece.extension") }
+            BrowserSettings()
+                .tabItem { Label("浏览器", systemImage: "safari") }
             UsageSettings()
                 .tabItem { Label("用量", systemImage: "chart.bar") }
-            MemorySettings()
-                .tabItem { Label("记忆", systemImage: "brain") }
-            SoulSettings()
-                .tabItem { Label("人格", systemImage: "person.crop.circle") }
-            SkillsSettings()
-                .tabItem { Label("技能", systemImage: "puzzlepiece.extension") }
             GeneralSettings()
                 .tabItem { Label("通用", systemImage: "gearshape") }
         }

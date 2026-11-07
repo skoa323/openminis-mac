@@ -44,6 +44,11 @@ struct OpenMinisMacApp: App {
             }
         }
 
+        Window("内置浏览器", id: "browser") {
+            BrowserPanelView()
+        }
+        .defaultSize(width: 1040, height: 720)
+
         Settings {
             SettingsView()
                 .environmentObject(store)

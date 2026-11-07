@@ -357,7 +357,7 @@ final class AppStore: ObservableObject {
         p += """
 
 
-        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页\(mem ? "、读写长期记忆（memory_write / memory_get）" : "")。
+        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页、控制内置多标签页浏览器（browser_use：支持页面导航、点击/输入、提取正文与 DOM 树、执行 JS、读写 Cookie、截图）\(mem ? "、读写长期记忆（memory_write / memory_get）" : "")。
 
         环境：
         - 系统：macOS \(osv)

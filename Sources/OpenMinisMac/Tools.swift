@@ -69,6 +69,32 @@ final class ToolRunner {
             ToolSpec(name: "web_fetch",
                      description: "HTTP GET 获取网页或 API 内容，HTML 会转为纯文本。",
                      parameters: obj(["url": str("http(s) 地址")], ["url"])),
+            ToolSpec(name: "browser_use",
+                     description: "控制内置多标签页 WKWebView 浏览器：支持 navigate、screenshot、click、type、get_text、get_readable、get_backbone、find_elements、scroll、scroll_and_collect、execute_js、hover、wait_for_dom_stable、get_page_info、new_tab、close_tab、list_tabs、get_cookies、set_cookies、set_user_agent、set_viewport、fetch。适合动态网页渲染、页面交互、登录会话与截图。",
+                     parameters: obj([
+                         "action": ["type": "string", "enum": BrowserAction.allCases.map(\.rawValue), "description": "要执行的浏览器动作"],
+                         "url": str("navigate 目标网址（支持 http/https/file）或 fetch 资源地址"),
+                         "selector": str("CSS 选择器（用于 click/type/get_text/scroll/hover/find_elements）"),
+                         "text": str("要输入的文本（type 动作）"),
+                         "script": str("要执行的 JavaScript 代码（execute_js，支持顶层 await 与 return）"),
+                         "direction": ["type": "string", "enum": ["up", "down"], "description": "滚动方向（默认 down）"],
+                         "amount": int("滚动像素距离（默认 500）"),
+                         "coordinate_x": int("点击的 X 坐标（click 的替代方式）"),
+                         "coordinate_y": int("点击的 Y 坐标（click 的替代方式）"),
+                         "tab_id": int("目标标签页 ID（默认当前活动标签）"),
+                         "user_agent": ["type": "string", "enum": ["desktop_safari", "mobile_safari"], "description": "切换当前标签的 User-Agent"],
+                         "viewport_width": int("视口宽度 CSS 像素（set_viewport，200-4096）"),
+                         "viewport_height": int("视口高度 CSS 像素（set_viewport，200-4096）"),
+                         "reset": bool("set_viewport 时设为 true 以恢复默认视口"),
+                         "full_page": bool("screenshot 时设为 true 以截取整页长图"),
+                         "max_depth": int("get_backbone 最大树深度（默认 5）"),
+                         "keywords": str("get_cookies 按名称筛选的空格分隔关键词"),
+                         "fuzzy": bool("get_cookies 关键词是否模糊包含匹配（默认 true）"),
+                         "cookies": str("set_cookies 的 Cookie JSON 数组字符串，每项含 name、value 等"),
+                         "item_selector": str("scroll_and_collect 列表项 CSS 选择器"),
+                         "scroll_count": int("scroll_and_collect 滚动步数（默认 10，最大 20）"),
+                         "timeout": int("wait_for_dom_stable 超时秒数（默认 10）"),
+                     ] as [String: Any], ["action"])),
         ]
         guard memory else { return base }
         return base + [
@@ -94,6 +120,7 @@ final class ToolRunner {
             case "edit_file": return try editFile(args)
             case "list_dir": return try listDir(args)
             case "web_fetch": return try await webFetch(args)
+            case "browser_use": return await BrowserManager.shared.runTool(args)
             case "memory_write", "memory_get":
                 guard memoryEnabled else {
                     return ToolResult(output: "Memory is disabled for this session. Use /memory to re-enable.", isError: true)
