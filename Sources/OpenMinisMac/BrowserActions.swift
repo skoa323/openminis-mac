@@ -298,6 +298,15 @@ enum BrowserLogic {
             return .ok(URL(fileURLWithPath: (s as NSString).expandingTildeInPath))
         }
         if s == "about:blank" { return .ok(URL(string: s)!) }
+        if !s.contains("://"), let colon = s.firstIndex(of: ":") {
+            let prefix = String(s[..<colon])
+            let rest = s[s.index(after: colon)...]
+            let portPrefix = rest.prefix { $0 != "/" }
+            let isHostPort = !portPrefix.isEmpty && portPrefix.allSatisfy(\.isNumber)
+            if !isHostPort, prefix.allSatisfy({ $0.isLetter || $0.isNumber || "+.-".contains($0) }) {
+                return .invalid("Cannot navigate to \(prefix.lowercased()): URLs. Only http://, https:// and file:// (or an absolute path) are supported.")
+            }
+        }
         if !s.contains("://") { s = "https://" + s }
         guard let url = URL(string: s), let scheme = url.scheme?.lowercased() else {
             return .invalid("Invalid URL: \(raw)")

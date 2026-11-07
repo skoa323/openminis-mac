@@ -101,8 +101,9 @@ final class BrowserTests: XCTestCase {
         XCTAssertFalse(fn.contains("/"))
         XCTAssertTrue(fn.hasSuffix("report.pdf"))
 
-        let wrapped = BrowserLogic.wrapExecuteJSReturn("const x = 1;\nawait fetch('/a')")
+        let wrapped = BrowserLogic.wrapExecuteJSReturn("const x = 1;\nreturn await fetch('/a')")
         XCTAssertTrue(wrapped.contains("return await fetch('/a')"))
+        XCTAssertTrue(wrapped.contains("__minisNormalize(__minisResult)"))
 
         let out = BrowserLogic.toolOutput(BrowserActionResult(text: "Done", tabId: 3), dialogs: ["[alert] hi"])
         XCTAssertTrue(out.hasPrefix("[tab_id: 3] Done"))
