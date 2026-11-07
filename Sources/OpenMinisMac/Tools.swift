@@ -16,16 +16,22 @@ private final class DataBox: @unchecked Sendable {
 final class ToolRunner {
     let workspace: URL
     let memoryEnabled: Bool
+    let conversationID: UUID?
+    let allowSubAgents: Bool
     /// Called before running a shell command. Return false to reject.
     let approve: (String) async -> Bool
     /// Called after a skill's SKILL.md is read (`write == false`) or written/edited (`write == true`).
     let onSkillFile: (String, Bool) -> Void
 
     init(workspace: URL, memoryEnabled: Bool = true,
+         conversationID: UUID? = nil,
+         allowSubAgents: Bool = true,
          onSkillFile: @escaping (String, Bool) -> Void = { _, _ in },
          approve: @escaping (String) async -> Bool) {
         self.workspace = workspace
         self.memoryEnabled = memoryEnabled
+        self.conversationID = conversationID
+        self.allowSubAgents = allowSubAgents
         self.onSkillFile = onSkillFile
         self.approve = approve
     }
@@ -36,7 +42,7 @@ final class ToolRunner {
 
     static var specs: [ToolSpec] { specs(memory: true) }
 
-    static func specs(memory: Bool) -> [ToolSpec] {
+    static func specs(memory: Bool, allowSubAgents: Bool = true, subAgentNames: [String] = [SubAgentDefinition.builtInName]) -> [ToolSpec] {
         func obj(_ props: [String: Any], _ required: [String]) -> [String: Any] {
             ["type": "object", "properties": props, "required": required]
         }
@@ -96,8 +102,50 @@ final class ToolRunner {
                          "timeout": int("wait_for_dom_stable 超时秒数（默认 10）"),
                      ] as [String: Any], ["action"])),
         ]
-        guard memory else { return base }
-        return base + [
+        var out = base
+        if allowSubAgents {
+            let agentEnum = subAgentNames.isEmpty ? [SubAgentDefinition.builtInName] : subAgentNames
+            out.append(ToolSpec(
+                name: SubAgentDefinition.toolName,
+                description: "将独立自包含的任务委派给子代理（Sub-Agent，在隐藏子会话中独立执行工具循环），或查询/调整/取消/恢复已启动的子代理。默认 action 为 delegate。每个父会话最多同时运行 \(SubAgentLimits.maxChildJobsPerParent) 个子代理，超出自动排队。wait=false（默认）立即返回 status=running 与 job_id，完成时以 <agent_callback> 新消息回调。",
+                parameters: obj([
+                    "tool_title": str("向用户展示的简短摘要（5-10 个词）"),
+                    "action": ["type": "string", "enum": ["delegate", "status", "steer", "cancel", "resume"], "description": "delegate（默认）：启动子代理；status：查询状态；steer：向运行中的子代理追加修正指令；cancel：停止子代理；resume：恢复上次中断的子代理"],
+                    "task": str("action=delegate 时必填：完整的任务说明（目标、路径/URL、约束、期望返回格式）"),
+                    "agent": ["type": "string", "enum": agentEnum, "description": "action=delegate 时选择子代理名称，留空使用通用子代理"],
+                    "model_choice": ["type": "string", "enum": ["same_as_me", "default_model", "sub_model"], "description": "当子代理未固定模型组时的模型选择（默认 same_as_me）"],
+                    "context": str("action=delegate 时可选附带的原始上下文文本"),
+                    "max_minutes": int("最大运行分钟数（默认 10，上限 60）"),
+                    "wait": bool("false（默认）后台运行并异步回调；true 阻塞等待完成"),
+                    "progress_report": ["type": "string", "enum": ["none", "frequent", "moderate"], "description": "后台运行时的进度汇报频率（none / frequent 15s / moderate 60s）"],
+                    "job_id": str("action=status/steer/cancel/resume 时的目标 job_id（支持前缀匹配）"),
+                    "message": str("action=steer 时必填：发给运行中子代理的修正指令"),
+                    "child_session_id": str("action=resume 时可选指定子会话 ID"),
+                ] as [String: Any], [])
+            ))
+            out.append(ToolSpec(
+                name: "scheduled_task",
+                description: "创建、查看、启停、立即执行或删除定时与延时任务（支持单次延时 after、循环间隔 interval+count、每日/周历时间 time+repeat+days、任务完成触发 of）。默认投递到当前对话（follow-up），也可新开对话（new）或后台子代理（child-of-current），并可预设每次触发自动先执行的 shell 命令（command）。",
+                parameters: obj([
+                    "action": ["type": "string", "enum": ["create", "list", "delete", "enable", "disable", "run", "skip_next"], "description": "要执行的定时任务操作"],
+                    "prompt": str("create 时必填：每次触发时投递给模型的提示词"),
+                    "label": str("任务简短名称"),
+                    "after": str("单次延时触发（如 '30s'、'15m'、'2h'）"),
+                    "interval": str("循环间隔触发（如 '10m'、'1h'）"),
+                    "count": int("循环触发总次数（省略则持续循环）"),
+                    "time": str("日历时间触发（24 小时制 HH:MM，如 '09:00'）"),
+                    "repeat": ["type": "string", "enum": ["daily", "weekdays", "weekends", "custom"], "description": "日历重复模式（默认 daily）"],
+                    "days": str("repeat=custom 时的星期列表（如 'mon,wed,fri'）"),
+                    "of": str("链式触发：指定前序 job_id 完成后触发"),
+                    "target": ["type": "string", "enum": ["follow-up", "new", "child-of-current"], "description": "投递目标（默认 follow-up 回到当前会话）"],
+                    "command": str("可选：每次触发时自动先执行的 shell 命令"),
+                    "command_timeout": int("预设 shell 命令超时秒数（1-3600）"),
+                    "id": str("delete/enable/disable/run/skip_next 时的任务 ID（支持前缀）"),
+                ] as [String: Any], ["action"])
+            ))
+        }
+        guard memory else { return out }
+        return out + [
             ToolSpec(name: "memory_write",
                      description: "Write a memory entry to today's daily log (YYYY-MM-DD.md). Memories persist across all sessions. Each entry is prepended with a timestamp. Save: user preferences, recurring patterns, key facts, project conventions, reusable knowledge. Avoid saving passwords, API keys, tokens, or secrets unless the user explicitly confirms after being warned. Keep entries concise and general-purpose. GLOBAL.md is read-only (user-maintained via Settings).",
                      parameters: obj(["content": str("The memory content to write. Use concise Markdown with a short heading (## Topic).")], ["content"])),
@@ -121,6 +169,16 @@ final class ToolRunner {
             case "list_dir": return try listDir(args)
             case "web_fetch": return try await webFetch(args)
             case "browser_use": return await BrowserManager.shared.runTool(args)
+            case "subagent_task":
+                guard allowSubAgents, let cid = conversationID else {
+                    return ToolResult(output: "Error: subagent_task is not available inside a sub-agent session.", isError: true)
+                }
+                return await AgentJobRegistry.shared.runSubAgentTool(args: args, parentConversationID: cid, toolUseID: call.id)
+            case "scheduled_task":
+                guard allowSubAgents else {
+                    return ToolResult(output: "Error: scheduled_task is not available inside a sub-agent session.", isError: true)
+                }
+                return await AgentJobRegistry.shared.runScheduledTaskTool(args: args, callerConversationID: conversationID)
             case "memory_write", "memory_get":
                 guard memoryEnabled else {
                     return ToolResult(output: "Memory is disabled for this session. Use /memory to re-enable.", isError: true)
@@ -157,6 +215,12 @@ final class ToolRunner {
     }
 
     // MARK: - shell
+
+    func runShellPreset(_ preset: ScheduledPresetToolCall) async -> ToolResult {
+        var args: [String: Any] = ["command": preset.command]
+        if let t = preset.timeoutSeconds { args["timeout"] = t }
+        return (try? await shell(args)) ?? ToolResult(output: "Preset shell command failed to execute.", isError: true)
+    }
 
     private func shell(_ args: [String: Any]) async throws -> ToolResult {
         let command = try string(args, "command")

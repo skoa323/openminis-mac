@@ -68,6 +68,7 @@ struct ChatView: View {
                 Divider()
             }
             messageScroller(matches: matches, current: current)
+            ActiveJobsBanner(conversationID: conversationID)
             if let a = store.approval(for: conversationID) {
                 ApprovalBar(approval: a)
             }
@@ -223,7 +224,11 @@ struct MessageRow: View {
 
     var body: some View {
         if message.role == .user {
-            UserBubble(message: message, conversationID: conversationID)
+            if let cb = AgentCallback.parse(message.content) {
+                AgentCallbackCardView(callback: cb)
+            } else {
+                UserBubble(message: message, conversationID: conversationID)
+            }
         } else {
             AssistantRow(message: message, results: results, conversationID: conversationID, streaming: streaming)
         }
@@ -463,6 +468,8 @@ struct ToolCallView: View {
         case "list_dir": return "folder"
         case "web_fetch": return "globe"
         case "browser_use": return "safari"
+        case "subagent_task": return "person.2.badge.gearshape"
+        case "scheduled_task": return "calendar.badge.clock"
         case "memory_write", "memory_get": return "brain"
         default: return "wrench"
         }
@@ -476,7 +483,7 @@ struct ToolCallView: View {
 
     private var summary: String {
         let a = args
-        for key in ["action", "command", "path", "url", "query", "content"] {
+        for key in ["tool_title", "label", "action", "task", "prompt", "command", "path", "url", "query", "content"] {
             if let s = a[key] as? String, !s.isEmpty {
                 return s.replacingOccurrences(of: "\n", with: " ")
             }

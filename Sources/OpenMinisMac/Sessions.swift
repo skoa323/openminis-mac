@@ -78,7 +78,7 @@ enum SessionSearch {
     static func search(_ convs: [Conversation], query: String) -> [SearchHit] {
         let ts = terms(query)
         guard !ts.isEmpty else { return [] }
-        return convs.sorted { $0.updatedAt > $1.updatedAt }.compactMap { c in
+        return convs.filter { !$0.isChild }.sorted { $0.updatedAt > $1.updatedAt }.compactMap { c in
             let titleHit = ts.contains { contains(c.title, $0) }
             let snip = snippet(c, terms: ts)
             guard titleHit || snip != nil else { return nil }
@@ -188,8 +188,9 @@ enum SidebarSection: Hashable, Identifiable {
 enum SidebarGrouping {
     /// Pinned (unfiled) → folders (pinned folders first, then by latest activity; empty ones last)
     /// → date buckets for the rest. Inside a folder: pinned first, then by updatedAt.
-    static func group(_ convs: [Conversation], folders: [ChatFolder], now: Date = Date())
+    static func group(_ allConvs: [Conversation], folders: [ChatFolder], now: Date = Date())
         -> [(SidebarSection, [Conversation])] {
+        let convs = allConvs.filter { !$0.isChild }
         let folderIDs = Set(folders.map(\.id))
         let filed = { (c: Conversation) -> Bool in c.folderID.map(folderIDs.contains) ?? false }
         var out: [(SidebarSection, [Conversation])] = []

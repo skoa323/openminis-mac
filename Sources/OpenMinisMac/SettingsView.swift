@@ -14,6 +14,10 @@ struct SettingsView: View {
                 .tabItem { Label("人格", systemImage: "person.crop.circle") }
             SkillsSettings()
                 .tabItem { Label("技能", systemImage: "puzzlepiece.extension") }
+            SubAgentsSettings()
+                .tabItem { Label("子代理", systemImage: "person.2.badge.gearshape") }
+            ScheduledAndBackgroundSettings()
+                .tabItem { Label("任务与后台", systemImage: "calendar.badge.clock") }
             BrowserSettings()
                 .tabItem { Label("浏览器", systemImage: "safari") }
             UsageSettings()
@@ -21,7 +25,7 @@ struct SettingsView: View {
             GeneralSettings()
                 .tabItem { Label("通用", systemImage: "gearshape") }
         }
-        .frame(width: 820, height: 580)
+        .frame(width: 860, height: 600)
     }
 }
 
@@ -357,6 +361,8 @@ struct GroupsSettings: View {
                         selection = nil
                         store.settings.groups.removeAll { $0.id == id }
                         if store.settings.activeGroupID == id { store.settings.activeGroupID = store.settings.groups.first?.id }
+                        if store.settings.subGroupID == id { store.settings.subGroupID = nil }
+                        SubAgentStore.shared.clearModelGroup(id)
                     } label: { Image(systemName: "minus") }
                     .buttonStyle(.borderless)
                     .disabled(selection == nil)

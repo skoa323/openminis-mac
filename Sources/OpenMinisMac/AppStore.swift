@@ -27,16 +27,24 @@ final class AppStore: ObservableObject {
     func sendFind(_ k: FindKind) { findEvent = FindEvent(kind: k, serial: findEvent.serial + 1) }
 
     private var tasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
+    struct QueuedTurn {
+        var text: String
+        var preset: ScheduledPresetToolCall?
+        var presetTitle: String?
+    }
+    var queuedTurns: [UUID: [QueuedTurn]] = [:]
+    var pendingPresets: [UUID: (call: ScheduledPresetToolCall, title: String)] = [:]
 
     init() {
         let s = AppStore.loadSettings()
         self.settings = s
         self.conversations = AppStore.loadConversations()
-        if conversations.isEmpty { conversations = [Conversation()] }
-        selectedID = conversations.first?.id
+        if !conversations.contains(where: { !$0.isChild }) { conversations.insert(Conversation(), at: 0) }
+        selectedID = conversations.first(where: { !$0.isChild })?.id
         try? FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
         MemoryStore.migrateLegacy(AppStore.memoryFile)
         reloadSkills()
+        AgentJobRegistry.shared.attach(store: self)
     }
 
     // MARK: - Paths & persistence
@@ -149,7 +157,7 @@ final class AppStore: ObservableObject {
         let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
         if let d = try? enc.encode(usageLog) { try? d.write(to: AppStore.usageFile, options: .atomic) }
     }
-    private func recordUsage(_ u: TokenUsage, entry e: ModelEntry) {
+    func recordUsage(_ u: TokenUsage, entry e: ModelEntry) {
         usageLog.append(UsageRecord(date: Date(), entryID: e.id, label: entryLabel(e), usage: u))
         if usageLog.count > 20000 { usageLog.removeFirst(usageLog.count - 20000) }
         saveUsage()
@@ -207,7 +215,7 @@ final class AppStore: ObservableObject {
     }
 
     func newConversation() {
-        if let empty = conversations.first(where: { $0.messages.isEmpty }) {
+        if let empty = conversations.first(where: { !$0.isChild && $0.messages.isEmpty }) {
             selectedID = empty.id
             return
         }
@@ -217,13 +225,7 @@ final class AppStore: ObservableObject {
     }
 
     func delete(_ id: UUID) {
-        stop(id)
-        conversations.removeAll { $0.id == id }
-        if conversations.isEmpty { conversations = [Conversation()] }
-        if selectedID == id || !conversations.contains(where: { $0.id == selectedID }) {
-            selectedID = conversations.first?.id
-        }
-        saveConversations()
+        deleteConversations([id])
     }
 
     func clear(_ id: UUID) {
@@ -234,21 +236,21 @@ final class AppStore: ObservableObject {
         saveConversations()
     }
 
-    private func touch(_ id: UUID) {
+    func touch(_ id: UUID) {
         guard let i = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations[i].updatedAt = Date()
-        if i != 0 {
+        if i != 0, !conversations[i].isChild {
             let c = conversations.remove(at: i)
             conversations.insert(c, at: 0)
         }
     }
 
-    private func append(_ m: ChatMessage, to id: UUID) {
+    func append(_ m: ChatMessage, to id: UUID) {
         guard let i = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations[i].messages.append(m)
     }
 
-    private func mutate(_ cid: UUID, _ mid: UUID, _ body: (inout ChatMessage) -> Void) {
+    func mutate(_ cid: UUID, _ mid: UUID, _ body: (inout ChatMessage) -> Void) {
         guard let ci = conversations.firstIndex(where: { $0.id == cid }),
               let mi = conversations[ci].messages.firstIndex(where: { $0.id == mid }) else { return }
         body(&conversations[ci].messages[mi])
@@ -260,8 +262,15 @@ final class AppStore: ObservableObject {
 
     func send(_ text: String, images: [String] = [], in id: UUID) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !images.isEmpty, !isRunning(id),
+        guard !trimmed.isEmpty || !images.isEmpty,
               let i = conversations.firstIndex(where: { $0.id == id }) else { return }
+        if isRunning(id) {
+            // If the conversation is currently running (e.g., waiting on a sub-agent),
+            // interrupt the current wait and queue the user's message to run immediately next.
+            queuedTurns[id, default: []].insert(QueuedTurn(text: trimmed, preset: nil, presetTitle: nil), at: 0)
+            tasks[id]?.task.cancel()
+            return
+        }
         if conversations[i].messages.isEmpty || conversations[i].title == Conversation.defaultTitle {
             let firstLine = trimmed.components(separatedBy: .newlines).first ?? trimmed
             conversations[i].title = firstLine.isEmpty ? "图片" : String(firstLine.prefix(30))
@@ -296,9 +305,10 @@ final class AppStore: ObservableObject {
         start(id)
     }
 
-    private func start(_ id: UUID) {
+    func start(_ id: UUID) {
         let token = UUID()
         runningIDs.insert(id)
+        AgentJobRegistry.shared.syncKeepAliveCounts()
         let task = Task { [weak self] in
             await self?.runAgent(id)
             self?.finish(id, token: token)
@@ -306,27 +316,34 @@ final class AppStore: ObservableObject {
         tasks[id] = (token, task)
     }
 
-    private func finish(_ id: UUID, token: UUID) {
+    func finish(_ id: UUID, token: UUID) {
         guard tasks[id]?.token == token else { return }
         tasks[id] = nil
         runningIDs.remove(id)
         saveConversations()
-        autoTitleIfNeeded(id)
+        if conversation(id)?.isChild != true {
+            autoTitleIfNeeded(id)
+        }
+        AgentJobRegistry.shared.syncKeepAliveCounts()
+        drainQueuedTurnsIfNeeded(id)
     }
 
     func stop(_ id: UUID) {
         tasks[id]?.task.cancel()
         tasks[id] = nil
         runningIDs.remove(id)
+        queuedTurns[id] = nil
+        pendingPresets[id] = nil
         let mine = approvals.filter { $0.conversationID == id }
         approvals.removeAll { $0.conversationID == id }
         for a in mine { a.continuation.resume(returning: false) }
         saveConversations()
+        AgentJobRegistry.shared.syncKeepAliveCounts()
     }
 
     // MARK: - Approvals
 
-    private func requestApproval(_ command: String, conversation id: UUID) async -> Bool {
+    func requestApproval(_ command: String, conversation id: UUID) async -> Bool {
         if !settings.confirmShell { return true }
         if Task.isCancelled { return false }
         return await withCheckedContinuation { cont in
@@ -347,17 +364,31 @@ final class AppStore: ObservableObject {
 
     // MARK: - Agent loop
 
-    private func systemPrompt(_ id: UUID) -> String {
+    func systemPrompt(_ id: UUID) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm EEEE"
         let osv = ProcessInfo.processInfo.operatingSystemVersionString
+        let isChild = conversation(id)?.isChild ?? false
+        if isChild {
+            return """
+            你是 OpenMinis 的子代理（Sub-Agent），在一个独立隐藏的子会话中运行，负责完成主代理委派的自包含任务。
+            你拥有与主代理相同的工具执行能力（shell /bin/zsh、读写和编辑文件、列目录、抓取网页、控制内置浏览器 browser_use），但看不到主对话历史，也没有长期记忆。
+            - 系统：macOS \(osv) · 工作区：\(workspaceURL.path) · 当前时间：\(f.string(from: Date()))
+            - 请直接调用工具完成任务，并在最后一轮输出清晰、完整的结论供主代理使用。
+            """ + SkillLibrary.promptFragment(enabledSkills(id))
+        }
+
         let soul = SoulStore.load()
         let mem = memoryEnabled(id)
         var p = soul.identitySection()
         p += """
 
 
-        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页、控制内置多标签页浏览器（browser_use：支持页面导航、点击/输入、提取正文与 DOM 树、执行 JS、读写 Cookie、截图）\(mem ? "、读写长期记忆（memory_write / memory_get）" : "")。
+        你可以通过工具直接操作这台电脑：shell（/bin/zsh，真实的 macOS 环境，可用 brew、git、python3、osascript 等）、读写和编辑文件、获取网页、控制内置多标签页浏览器（browser_use：支持页面导航、点击/输入、提取正文与 DOM 树、执行 JS、读写 Cookie、截图）、委派子代理并行处理复杂任务（subagent_task）、管理定时与延时任务（scheduled_task）\(mem ? "、读写长期记忆（memory_write / memory_get）" : "")。
+
+        \(SubAgentRoster.rosterSection(SubAgentStore.shared.subAgents, groupName: { gid in
+            settings.groups.first(where: { $0.id == gid })?.name
+        }))
 
         环境：
         - 系统：macOS \(osv)
@@ -387,7 +418,7 @@ final class AppStore: ObservableObject {
 
     /// History as sent to the model: drops local error notices and empty assistant turns,
     /// and patches any tool call that never got a result (e.g. after a stop).
-    private func apiHistory(_ id: UUID, limit: Int? = nil) -> [ChatMessage] {
+    func apiHistory(_ id: UUID, limit: Int? = nil) -> [ChatMessage] {
         guard let c = conversation(id) else { return [] }
         var out: [ChatMessage] = []
         var msgs = c.messages
@@ -442,15 +473,37 @@ final class AppStore: ObservableObject {
         let requested = thinking(for: id)
 
         try? FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
-        let mem = memoryEnabled(id)
+        let isChild = conversation(id)?.isChild ?? false
+        let mem = isChild ? false : memoryEnabled(id)
         let runner = ToolRunner(workspace: workspaceURL, memoryEnabled: mem,
+                                conversationID: id, allowSubAgents: !isChild,
                                 onSkillFile: { [weak self] sid, wrote in
                                     Task { @MainActor in self?.skillTouched(sid, wrote: wrote) }
                                 }) { [weak self] cmd in
             guard let self else { return false }
             return await self.requestApproval(cmd, conversation: id)
         }
-        let specs = ToolRunner.specs(memory: mem)
+        let specs = ToolRunner.specs(memory: mem, allowSubAgents: !isChild,
+                                     subAgentNames: SubAgentStore.shared.subAgents.map(\.name))
+
+        // If this turn was triggered by a scheduled job with a preset shell command,
+        // execute it automatically as the synthetic first tool call before asking the model.
+        if let preset = pendingPresets.removeValue(forKey: id) {
+            let callID = ScheduledPresetToolCall.makeToolUseId()
+            let argsJSON: String = {
+                var d: [String: Any] = ["command": preset.call.command]
+                if let t = preset.call.timeoutSeconds { d["timeout"] = t }
+                guard let data = try? JSONSerialization.data(withJSONObject: d),
+                      let s = String(data: data, encoding: .utf8) else { return "{}" }
+                return s
+            }()
+            let tc = ToolCall(id: callID, name: "shell", arguments: argsJSON)
+            append(ChatMessage(role: .assistant, content: "", toolCalls: [tc]), to: id)
+            let res = await runner.runShellPreset(preset.call)
+            append(ChatMessage(role: .tool, content: res.output, toolCallId: callID, toolName: "shell", isError: res.isError), to: id)
+            saveConversations()
+        }
+
         var ci = 0   // current candidate; sticks across tool iterations once a fallback happened
 
         for _ in 0..<max(1, settings.maxIterations) {

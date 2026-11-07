@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct OpenMinisMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = AppStore()
+    @ObservedObject private var keepAlive = BackgroundKeepAliveManager.shared
 
     var body: some Scene {
         Window("OpenMinis", id: "main") {
@@ -23,6 +24,7 @@ struct OpenMinisMacApp: App {
                 .frame(minWidth: 760, minHeight: 500)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     store.saveConversations()
+                    AgentJobRegistry.shared.saveToDisk()
                 }
         }
         .defaultSize(width: 1100, height: 760)
@@ -48,6 +50,12 @@ struct OpenMinisMacApp: App {
             BrowserPanelView()
         }
         .defaultSize(width: 1040, height: 720)
+
+        MenuBarExtra("OpenMinis",
+                     systemImage: keepAlive.hasActiveWork ? "bolt.horizontal.circle.fill" : "sparkles",
+                     isInserted: $keepAlive.showMenuBarExtra) {
+            MenuBarJobsView()
+        }
 
         Settings {
             SettingsView()

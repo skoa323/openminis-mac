@@ -145,11 +145,16 @@ extension AppStore {
     }
 
     func deleteConversations(_ ids: Set<UUID>) {
-        for id in ids { stop(id) }
-        conversations.removeAll { ids.contains($0.id) }
-        if conversations.isEmpty { conversations = [Conversation()] }
-        if let s = selectedID, ids.contains(s) || !conversations.contains(where: { $0.id == s }) {
-            selectedID = conversations.first?.id
+        let childIDs = Set(conversations.filter { $0.parentConversationID.map(ids.contains) ?? false }.map(\.id))
+        let allIDs = ids.union(childIDs)
+        for id in allIDs {
+            stop(id)
+            AgentJobRegistry.shared.cancelAll(forConversation: id)
+        }
+        conversations.removeAll { allIDs.contains($0.id) }
+        if !conversations.contains(where: { !$0.isChild }) { conversations.insert(Conversation(), at: 0) }
+        if let s = selectedID, allIDs.contains(s) || !conversations.contains(where: { $0.id == s && !$0.isChild }) {
+            selectedID = conversations.first(where: { !$0.isChild })?.id
         }
         saveConversations()
     }

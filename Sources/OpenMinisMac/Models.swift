@@ -88,14 +88,18 @@ struct Conversation: Codable, Identifiable, Hashable {
     var memoryEnabled: Bool? = nil
     /// Per-session skill switches; absent = follow the skill's global switch.
     var skillOverrides: [String: Bool] = [:]
+    /// Hidden child session spawned by `subagent_task` or `child-of-current` scheduled job.
+    var parentConversationID: UUID? = nil
+    var parentToolUseID: String? = nil
 
     var isPinned: Bool { pinnedAt != nil }
+    var isChild: Bool { parentConversationID != nil }
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case id, title, messages, createdAt, updatedAt, groupID, thinkingLevel, pinnedAt, folderID, icon,
-             memoryEnabled, skillOverrides
+             memoryEnabled, skillOverrides, parentConversationID, parentToolUseID
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -111,6 +115,8 @@ struct Conversation: Codable, Identifiable, Hashable {
         icon = try c.decodeIfPresent(String.self, forKey: .icon)
         memoryEnabled = try c.decodeIfPresent(Bool.self, forKey: .memoryEnabled)
         skillOverrides = try c.decodeIfPresent([String: Bool].self, forKey: .skillOverrides) ?? [:]
+        parentConversationID = try c.decodeIfPresent(UUID.self, forKey: .parentConversationID)
+        parentToolUseID = try c.decodeIfPresent(String.self, forKey: .parentToolUseID)
     }
 }
 
@@ -153,6 +159,8 @@ struct AppSettings: Codable {
     var entries: [ModelEntry] = []
     var groups: [ModelGroup] = []
     var activeGroupID: UUID? = nil
+    /// Optional light/economy group used when a sub-agent requests `model_choice: "sub_model"`.
+    var subGroupID: UUID? = nil
     var defaultThinkingLevel: ThinkingLevel = .medium
     var customPrompt: String = ""
     var workspacePath: String = NSHomeDirectory() + "/OpenMinis"
@@ -164,7 +172,7 @@ struct AppSettings: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case instances, entries, groups, activeGroupID, defaultThinkingLevel,
+        case instances, entries, groups, activeGroupID, subGroupID, defaultThinkingLevel,
              customPrompt, workspacePath, confirmShell, maxIterations, autoTitle, memoryDefault,
              profiles, activeProfileID // legacy
     }
@@ -175,6 +183,7 @@ struct AppSettings: Codable {
         entries = try c.decodeIfPresent([ModelEntry].self, forKey: .entries) ?? []
         groups = try c.decodeIfPresent([ModelGroup].self, forKey: .groups) ?? []
         activeGroupID = try c.decodeIfPresent(UUID.self, forKey: .activeGroupID)
+        subGroupID = try c.decodeIfPresent(UUID.self, forKey: .subGroupID)
         defaultThinkingLevel = (try? c.decode(ThinkingLevel.self, forKey: .defaultThinkingLevel)) ?? .medium
         customPrompt = try c.decodeIfPresent(String.self, forKey: .customPrompt) ?? ""
         workspacePath = try c.decodeIfPresent(String.self, forKey: .workspacePath) ?? NSHomeDirectory() + "/OpenMinis"
@@ -195,6 +204,7 @@ struct AppSettings: Codable {
         try c.encode(entries, forKey: .entries)
         try c.encode(groups, forKey: .groups)
         try c.encodeIfPresent(activeGroupID, forKey: .activeGroupID)
+        try c.encodeIfPresent(subGroupID, forKey: .subGroupID)
         try c.encode(defaultThinkingLevel, forKey: .defaultThinkingLevel)
         try c.encode(customPrompt, forKey: .customPrompt)
         try c.encode(workspacePath, forKey: .workspacePath)
